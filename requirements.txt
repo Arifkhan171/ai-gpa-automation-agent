@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────
+# Agentic GPA Calculation System
+# Requirements — Python 3.11+
+# ─────────────────────────────────────────
+
+# LangChain / LangGraph / LangSmith
+langchain
+langgraph
+langsmith
+langchain-google-genai
+
+# Excel Parsing
+openpyxl
+
+# Google Drive API
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# Data Validation
+pydantic>=2.0
+
+# Database
+sqlalchemy
+alembic
+psycopg2-binary
+
+# Dashboard
+streamlit
+
+# Environment Variables
+python-dotenv
