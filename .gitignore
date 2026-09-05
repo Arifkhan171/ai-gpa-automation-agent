@@ -23,6 +23,7 @@ env/
 
 # Google credentials — NEVER commit these
 credentials/
+credentials.json
 
 # VS Code
 .vscode/
