@@ -192,6 +192,16 @@
 #      download temporarily → parse → delete → return dicts
 # Branch: feature/parser-agent
 # ─────────────────────────────────────────────────────────────
+"""
+parser_agent.py
+---------------
+LangGraph Node 2 — Excel Parser Agent.
+Reads .xlsx and .csv mark sheets from Google Drive.
+Returns a list of result dicts — one per file.
+
+ASSIGNED TO : Engineer 1 (feature/parser-agent)
+STATUS      : FIXED — pandas added, CSV warnings aligned with XLSX
+"""
 
 import os
 import tempfile
@@ -210,28 +220,25 @@ load_dotenv()
 CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
 DRIVE_FOLDER_NAME = os.getenv("DRIVE_FOLDER_NAME", "GPA-MarkSheets")
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-SUPPORTED_EXTENSIONS = [".xlsx", ".csv"]
 
-# MIME types Google Drive uses to identify file types
 MIME_FOLDER = "application/vnd.google-apps.folder"
 MIME_XLSX   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_CSV    = "text/csv"
 SUPPORTED_MIMES = [MIME_XLSX, MIME_CSV]
 
 
-# ── FUNCTION 1 ───────────────────────────────────────────────
+# ── FUNCTION 1 ────────────────────────────────────────────────
 def connect_to_drive():
     """
-    Connects to Google Drive using your credentials.json file.
-    Returns a Drive service object that all other functions use
-    to talk to Google Drive API.
+    Connects to Google Drive using credentials.json.
+    Returns a Drive service object.
     """
     creds_path = Path(CREDENTIALS_PATH)
 
     if not creds_path.exists():
         raise FileNotFoundError(
             f"[ParserAgent] credentials.json not found at: {CREDENTIALS_PATH}\n"
-            f"Make sure you downloaded it from Google Cloud Console."
+            f"Download it from Google Cloud Console."
         )
 
     credentials = service_account.Credentials.from_service_account_file(
@@ -244,13 +251,11 @@ def connect_to_drive():
     return service
 
 
-# ── FUNCTION 2 ───────────────────────────────────────────────
+# ── FUNCTION 2 ────────────────────────────────────────────────
 def find_root_folder(service, folder_name: str) -> str:
     """
     Searches Google Drive for the root folder by name.
-    Returns the folder ID so we can crawl inside it.
-    The folder ID is like an address — every file and folder
-    in Google Drive has a unique ID.
+    Returns the folder ID.
     """
     query = (
         f"name = '{folder_name}' "
@@ -276,18 +281,11 @@ def find_root_folder(service, folder_name: str) -> str:
     return folder_id
 
 
-# ── FUNCTION 3 ───────────────────────────────────────────────
+# ── FUNCTION 3 ────────────────────────────────────────────────
 def crawl_folder_recursively(service, folder_id: str, all_files: list):
     """
-    This is the smart crawler. It opens a folder and looks
-    at every item inside:
-    - If item is a FILE and is .xlsx or .csv → add to list
-    - If item is a FOLDER → go inside it and repeat
-    - If item is anything else → skip it silently
-
-    It does not care how deep the folders go.
-    It will keep going until it has found every Excel/CSV
-    file no matter how nested the structure is.
+    Recursively crawls a Google Drive folder.
+    Collects all .xlsx and .csv files no matter how deep.
     """
     query = (
         f"'{folder_id}' in parents "
@@ -302,37 +300,27 @@ def crawl_folder_recursively(service, folder_id: str, all_files: list):
     items = results.get("files", [])
 
     for item in items:
-        name     = item["name"]
-        mime     = item["mimeType"]
-        file_id  = item["id"]
+        name    = item["name"]
+        mime    = item["mimeType"]
+        file_id = item["id"]
 
         if mime == MIME_FOLDER:
-            # It is a folder — go inside it recursively
             print(f"[ParserAgent] 📁 Entering folder: {name}")
             crawl_folder_recursively(service, file_id, all_files)
 
         elif mime in SUPPORTED_MIMES:
-            # It is a supported file — add to our list
             print(f"[ParserAgent] 📄 Found file: {name}")
-            all_files.append({
-                "id":   file_id,
-                "name": name,
-                "mime": mime
-            })
+            all_files.append({"id": file_id, "name": name, "mime": mime})
 
         else:
-            # It is something else — skip silently
             print(f"[ParserAgent] ⏭️  Skipping unsupported file: {name}")
 
 
-# ── FUNCTION 4 ───────────────────────────────────────────────
+# ── FUNCTION 4 ────────────────────────────────────────────────
 def download_and_parse_file(service, file_info: dict) -> dict:
     """
-    Downloads one file from Google Drive into a temporary
-    folder on your machine, parses it into a list of dicts,
-    then deletes the temp file immediately.
-
-    Returns a result dict with metadata + records.
+    Downloads one file from Google Drive into a temp folder,
+    parses it, deletes the temp file, returns the result dict.
     """
     file_id   = file_info["id"]
     file_name = file_info["name"]
@@ -340,24 +328,20 @@ def download_and_parse_file(service, file_info: dict) -> dict:
 
     print(f"[ParserAgent] ⬇️  Downloading: {file_name}")
 
-    # Download the file content into memory first
-    request  = service.files().get_media(fileId=file_id)
-    buffer   = io.BytesIO()
+    request    = service.files().get_media(fileId=file_id)
+    buffer     = io.BytesIO()
     downloader = MediaIoBaseDownload(buffer, request)
 
     done = False
     while not done:
         _, done = downloader.next_chunk()
 
-    buffer.seek(0)  # rewind buffer to beginning
+    buffer.seek(0)
 
-    # Save to a temporary file
     suffix = ".xlsx" if mime == MIME_XLSX else ".csv"
 
     with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=suffix,
-        prefix="gpa_temp_"
+        delete=False, suffix=suffix, prefix="gpa_temp_"
     ) as tmp_file:
         tmp_file.write(buffer.read())
         tmp_path = tmp_file.name
@@ -365,34 +349,67 @@ def download_and_parse_file(service, file_info: dict) -> dict:
     print(f"[ParserAgent] 💾 Saved temporarily to: {tmp_path}")
 
     try:
-        # Parse based on file type
         if suffix == ".xlsx":
             result = parse_xlsx_file(tmp_path, file_name)
         else:
             result = parse_csv_file(tmp_path, file_name)
-
     finally:
-        # Always delete temp file — even if parsing crashes
         os.unlink(tmp_path)
         print(f"[ParserAgent] 🗑️  Deleted temp file: {tmp_path}")
 
     return result
 
 
-# ── FUNCTION 5 (UPDATED) ─────────────────────────────────────
+# ── HELPER: build warnings for one record ────────────────────
+def _build_warnings(record: dict) -> list[str]:
+    """
+    Checks all 8 required fields and returns a list of
+    warning strings for any that are missing or None.
+    Used by both XLSX and CSV parsers so the warning format
+    is always identical — Engineer 2 receives consistent data
+    regardless of file type.
+    """
+    warnings = []
+
+    if not record.get("student_name"):
+        warnings.append("student_name is missing")
+
+    if not record.get("roll_no"):
+        warnings.append("roll_no is missing — student cannot be identified")
+
+    if not record.get("father_name"):
+        warnings.append("father_name is missing")
+
+    if not record.get("subject_name"):
+        warnings.append("subject_name is missing")
+
+    if record.get("total_marks") is None:
+        warnings.append("total_marks is missing")
+
+    if record.get("obtained_marks") is None:
+        warnings.append("obtained_marks is missing — student may be absent")
+
+    if record.get("credit_hours") is None:
+        warnings.append("credit_hours is missing")
+
+    if not record.get("department"):
+        warnings.append("department is missing")
+
+    return warnings
+
+
+# ── FUNCTION 5 ────────────────────────────────────────────────
 def parse_xlsx_file(file_path: str, file_name: str) -> dict:
     """
     Parses an .xlsx file using openpyxl.
     Reads metadata from rows 1-2.
     Reads ALL student rows from row 4 onward.
-    Never skips any row — even incomplete ones.
-    Flags missing fields in parse_warnings so HITL
-    dashboard can show administrator what needs fixing.
+    Never skips incomplete rows — passes everything to
+    Engineer 2 with warnings attached for HITL review.
     """
     workbook = openpyxl.load_workbook(file_path, data_only=True)
     sheet    = workbook.active
 
-    # Read metadata from rows 1 and 2
     metadata = {
         "university_info": str(sheet.cell(row=1, column=1).value or "").strip(),
         "subject_info":    str(sheet.cell(row=2, column=1).value or "").strip(),
@@ -405,11 +422,10 @@ def parse_xlsx_file(file_path: str, file_name: str) -> dict:
     for row in sheet.iter_rows(
         min_row=4, min_col=1, max_col=8, values_only=True
     ):
-        # Skip only if the ENTIRE row is empty
+        # Skip only fully empty rows
         if all(cell is None for cell in row):
             continue
 
-        # Build the record — never skip, always include
         record = {
             "student_name":   str(row[0]).strip() if row[0] is not None else None,
             "roll_no":        str(row[1]).strip() if row[1] is not None else None,
@@ -421,36 +437,9 @@ def parse_xlsx_file(file_path: str, file_name: str) -> dict:
             "department":     str(row[7]).strip() if row[7] is not None else None,
         }
 
-        # Check every field — collect warnings for missing ones
-        warnings = []
-
-        if record["student_name"] is None:
-            warnings.append("student_name is missing")
-
-        if record["roll_no"] is None:
-            warnings.append("roll_no is missing — student cannot be identified")
-
-        if record["father_name"] is None:
-            warnings.append("father_name is missing")
-
-        if record["subject_name"] is None:
-            warnings.append("subject_name is missing")
-
-        if record["total_marks"] is None:
-            warnings.append("total_marks is missing")
-
-        if record["obtained_marks"] is None:
-            warnings.append("obtained_marks is missing — student may be absent")
-
-        if record["credit_hours"] is None:
-            warnings.append("credit_hours is missing")
-
-        if record["department"] is None:
-            warnings.append("department is missing")
-
-        # Attach warnings and issue flag to the record
-        record["has_issues"]      = len(warnings) > 0
-        record["parse_warnings"]  = warnings
+        warnings = _build_warnings(record)
+        record["has_issues"]     = len(warnings) > 0
+        record["parse_warnings"] = warnings
 
         records.append(record)
 
@@ -463,36 +452,54 @@ def parse_xlsx_file(file_path: str, file_name: str) -> dict:
         "records":   records,
     }
 
-# ── FUNCTION 6 ───────────────────────────────────────────────
+
+# ── FUNCTION 6 ────────────────────────────────────────────────
 def parse_csv_file(file_path: str, file_name: str) -> dict:
     """
     Parses a .csv file using pandas.
     Expects the same 8 columns as the xlsx files.
-    Skips rows with no roll number.
+
+    FIX APPLIED: Never skips rows — even rows with missing
+    roll_no are passed through with warnings attached.
+    This preserves all student records for HITL review.
+    If we silently skip rows here, those students disappear
+    from the system with no record of why.
+
+    FIX APPLIED: Every record now carries has_issues and
+    parse_warnings — identical structure to XLSX records.
+    Engineer 2 receives consistent data regardless of
+    whether the source file was .xlsx or .csv.
     """
     df = pd.read_csv(file_path)
 
-    # Normalize column names — lowercase, strip spaces
-    df.columns = [col.strip().lower().replace(" ", "_") for col in df.columns]
+    # Normalize column names
+    df.columns = [
+        col.strip().lower().replace(" ", "_") for col in df.columns
+    ]
+
+    # Skip only rows where every single column is NaN
+    df = df.dropna(how="all")
 
     records = []
 
     for _, row in df.iterrows():
 
-        # Skip rows with no roll number
-        if pd.isna(row.get("roll_no", None)):
-            continue
-
         record = {
             "student_name":   str(row.get("student_name", "")).strip() or None,
-            "roll_no":        str(row.get("roll_no", "")).strip()       or None,
-            "father_name":    str(row.get("father_name", "")).strip()   or None,
-            "subject_name":   str(row.get("subject_name", "")).strip()  or None,
-            "total_marks":    row.get("total_marks",    None),
-            "obtained_marks": row.get("obtained_marks", None),
-            "credit_hours":   row.get("credit_hours",   None),
-            "department":     str(row.get("department", "")).strip()    or None,
+            "roll_no":        str(row.get("roll_no",       "")).strip() or None,
+            "father_name":    str(row.get("father_name",   "")).strip() or None,
+            "subject_name":   str(row.get("subject_name",  "")).strip() or None,
+            "total_marks":    row.get("total_marks",    None) if pd.notna(row.get("total_marks",    None)) else None,
+            "obtained_marks": row.get("obtained_marks", None) if pd.notna(row.get("obtained_marks", None)) else None,
+            "credit_hours":   row.get("credit_hours",   None) if pd.notna(row.get("credit_hours",   None)) else None,
+            "department":     str(row.get("department",    "")).strip() or None,
         }
+
+        # Same warning system as XLSX — consistent for Engineer 2
+        warnings = _build_warnings(record)
+        record["has_issues"]     = len(warnings) > 0
+        record["parse_warnings"] = warnings
+
         records.append(record)
 
     return {
@@ -505,31 +512,23 @@ def parse_csv_file(file_path: str, file_name: str) -> dict:
     }
 
 
-# ── FUNCTION 7 ───────────────────────────────────────────────
+# ── FUNCTION 7 ────────────────────────────────────────────────
 def parse_drive_files(folder_name: str = None) -> list[dict]:
     """
-    MASTER FUNCTION — This is what LangGraph calls as Node 2.
+    MASTER FUNCTION — LangGraph calls this as Node 2.
 
     Full pipeline:
     1. Connect to Google Drive
     2. Find the root folder
     3. Crawl all folders recursively
-    4. Download each file temporarily
-    5. Parse it
-    6. Delete temp file
-    7. Return all results as a list
-
-    Returns a list of result dicts — one per file found.
+    4. Download, parse, delete each file
+    5. Return all results as a list of dicts
     """
     folder_name = folder_name or DRIVE_FOLDER_NAME
 
-    # Step 1: Connect
-    service = connect_to_drive()
-
-    # Step 2: Find root folder
+    service        = connect_to_drive()
     root_folder_id = find_root_folder(service, folder_name)
 
-    # Step 3: Crawl all folders recursively
     all_files = []
     crawl_folder_recursively(service, root_folder_id, all_files)
 
@@ -539,14 +538,15 @@ def parse_drive_files(folder_name: str = None) -> list[dict]:
 
     print(f"\n[ParserAgent] 📊 Total files found: {len(all_files)}")
 
-    # Step 4-6: Download, parse, delete each file
     all_results = []
     for file_info in all_files:
         try:
             result = download_and_parse_file(service, file_info)
             all_results.append(result)
-            print(f"[ParserAgent] ✅ Parsed '{file_info['name']}' "
-                  f"— {result['row_count']} rows\n")
+            print(
+                f"[ParserAgent] ✅ Parsed '{file_info['name']}' "
+                f"— {result['row_count']} rows\n"
+            )
         except Exception as e:
             print(f"[ParserAgent] ❌ Failed to parse '{file_info['name']}': {e}\n")
             continue
@@ -565,19 +565,5 @@ if __name__ == "__main__":
             "rows":      r["row_count"],
             "first_row": r["records"][0] if r["records"] else None
         }, indent=2, ensure_ascii=False))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#python src/agents/parser_agent.py
+        
+        #python src/agents/parser_agent.py
