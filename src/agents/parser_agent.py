@@ -1,569 +1,347 @@
-# """
-# parser_agent.py
-# ---------------
-# LangGraph Node 2 — Excel Parser Agent.
-# Reads a .xlsx mark sheet
-#  and returns a list of
-# Python dictionaries (one dict per student row).
-
-# ASSIGNED TO : Engineer 1 (feature/parser-agent)
-# STATUS      : NOT STARTED
-
-# Expected output format:
-# [
-#     {
-#         "student_name"  : str,
-#         "roll_no"       : str,
-#         "father_name"   : str,
-#         "subject_name"  : str,
-#         "total_marks"   : float,
-#         "obtained_marks": float,
-#         "credit_hours"  : int,
-#         "department"    : str
-#     },
-#     ...
-# ]
-# """
-
-# # ─────────────────────────────────────────────────────────────
-# # parser_agent.py
-# # Node 2 — Agentic GPA Calculation System
-# # Job: Read an Excel mark sheet → return a list of dicts
-# # Branch: feature/parser-agent
-# # ─────────────────────────────────────────────────────────────
-
-# import openpyxl
-# from pathlib import Path
-# from dotenv import load_dotenv
-
-# load_dotenv()
-
-
-# # ── FUNCTION 1 ───────────────────────────────────────────────
-# def load_workbook_safe(file_path: str):
-#     """Opens the Excel file safely. Raises clear errors if file
-#     is missing, wrong format, or corrupted."""
-
-#     path = Path(file_path)
-
-#     if not path.exists():
-#         raise FileNotFoundError(
-#             f"[ParserAgent] File not found: {file_path}"
-#         )
-
-#     if path.suffix.lower() != ".xlsx":
-#         raise ValueError(
-#             f"[ParserAgent] Expected .xlsx file, got: {path.suffix}"
-#         )
-
-#     try:
-#         workbook = openpyxl.load_workbook(file_path, data_only=True)
-#         return workbook
-#     except Exception as e:
-#         raise RuntimeError(
-#             f"[ParserAgent] Failed to open workbook: {e}"
-#         )
-
-
-# # ── FUNCTION 2 ───────────────────────────────────────────────
-# def get_sheet_metadata(sheet) -> dict:
-#     """Reads rows 1 and 2 of the sheet to extract subject-level
-#     info: university, subject name, semester, credit hours."""
-
-#     try:
-#         row1 = sheet.cell(row=1, column=1).value or ""
-#         row2 = sheet.cell(row=2, column=1).value or ""
-
-#         metadata = {
-#             "university_info": str(row1).strip(),
-#             "subject_info":    str(row2).strip(),
-#             "sheet_name":      sheet.title,
-#         }
-#         return metadata
-
-#     except Exception as e:
-#         raise RuntimeError(
-#             f"[ParserAgent] Failed to read metadata: {e}"
-#         )
-
-
-# # ── FUNCTION 3 ───────────────────────────────────────────────
-# def parse_sheet_rows(sheet) -> list[dict]:
-#     """Reads from row 4 onward (row 3 is headers, rows 1-2 are
-#     metadata). Converts each student row into a dictionary.
-#     Does NOT skip or crash on bad data — passes everything forward
-#     so the Validation Agent can decide what is valid."""
-
-#     # These are the exact column positions in your Excel files
-#     COLUMNS = {
-#         "student_name":   1,
-#         "roll_no":        2,
-#         "father_name":    3,
-#         "subject_name":   4,
-#         "total_marks":    5,
-#         "obtained_marks": 6,
-#         "credit_hours":   7,
-#         "department":     8,
-#     }
-
-#     records = []
-
-#     # iter_rows starts at row 4 (skipping header rows 1, 2, 3)
-#     # min_col=1, max_col=8 means only read the 8 columns we need
-#     for row in sheet.iter_rows(min_row=4, min_col=1, max_col=8, values_only=True):
-
-#                 # Skip completely empty rows
-#         if all(cell is None for cell in row):
-#             continue
-
-#         # Skip note/comment rows — real students always have a roll number
-#         if row[1] is None:
-#             continue
-
-#         record = {
-#             "student_name":   str(row[0]).strip() if row[0] is not None else None,
-#             "roll_no":        str(row[1]).strip() if row[1] is not None else None,
-#             "father_name":    str(row[2]).strip() if row[2] is not None else None,
-#             "subject_name":   str(row[3]).strip() if row[3] is not None else None,
-#             "total_marks":    row[4],
-#             "obtained_marks": row[5],   # intentionally kept as-is (could be None)
-#             "credit_hours":   row[6],
-#             "department":     str(row[7]).strip() if row[7] is not None else None,
-#         }
-
-#         records.append(record)
-
-#     return records
-
-
-# # ── FUNCTION 4 ───────────────────────────────────────────────
-# def parse_excel_file(file_path: str) -> dict:
-#     """Master function. This is what LangGraph calls as Node 2.
-#     Takes a file path, runs all 3 functions above, and returns
-#     a clean result package containing metadata + all student rows."""
-
-#     # Step 1: open the file
-#     workbook = load_workbook_safe(file_path)
-
-#     # Step 2: get the active sheet
-#     sheet = workbook.active
-
-#     # Step 3: read metadata from rows 1-2
-#     metadata = get_sheet_metadata(sheet)
-
-#     # Step 4: read all student rows from row 4 onward
-#     records = parse_sheet_rows(sheet)
-
-#     # Step 5: package everything together
-#     result = {
-#         "status":    "parsed",
-#         "file_path": str(file_path),
-#         "metadata":  metadata,
-#         "row_count": len(records),
-#         "records":   records,
-#     }
-
-#     print(f"[ParserAgent] ✅ Parsed '{metadata['sheet_name']}' "
-#           f"— {len(records)} rows found.")
-
-#     return result
-
-
-# # ── QUICK TEST (only runs when you execute this file directly) ─
-# if __name__ == "__main__":
-#     import json
-#     import os
-
-#     # Change this path to any of your 5 Excel files
-#     TEST_FILE = os.path.join("data", "sample_sheets", "Sheet3_Calculus_Sem3.xlsx")
-
-#     result = parse_excel_file(TEST_FILE)
-
-#     # Pretty print the full output
-#     print(json.dumps(result, indent=2, ensure_ascii=False))
-
-
-
-
-# ─────────────────────────────────────────────────────────────
-# parser_agent.py
-# Node 2 — Agentic GPA Calculation System
-# Job: Connect to Google Drive → find all Excel/CSV files →
-#      download temporarily → parse → delete → return dicts
-# Branch: feature/parser-agent
-# ─────────────────────────────────────────────────────────────
 """
-parser_agent.py
----------------
-LangGraph Node 2 — Excel Parser Agent.
-Reads .xlsx and .csv mark sheets from Google Drive.
-Returns a list of result dicts — one per file.
+src/agents/parser_agent.py
+==========================
+LangGraph Node 2 — Excel / CSV Parser Agent
+University of Loralai — CS Department
+Tech Lead: Arif Khan
 
-ASSIGNED TO : Engineer 1 (feature/parser-agent)
-STATUS      : FIXED — pandas added, CSV warnings aligned with XLSX
+Accepts ANY .xlsx or .csv file — no naming convention required.
+Detects semester number and subject name from filename heuristics,
+then falls back to file content when heuristics fail.
+
+Public API used by the dashboard
+──────────────────────────────────
+  detect_semester_and_subject(filename)  → (semester_label, subject_name)
+  parse_file_to_records(file_bytes, filename, subject_hint) → result_dict
+  parser_agent_node(state)               → state  (LangGraph wrapper)
+
+Output record format (per student row)
+──────────────────────────────────────
+  {
+      "student_name"  : str | None,
+      "roll_no"       : str | None,
+      "father_name"   : str | None,
+      "subject_name"  : str | None,
+      "total_marks"   : float | None,
+      "obtained_marks": float | None,
+      "credit_hours"  : int | None,
+      "department"    : str | None,
+      "has_issues"    : bool,
+      "parse_warnings": list[str],
+  }
 """
 
-import os
-import tempfile
-import openpyxl
-import pandas as pd
-from pathlib import Path
-from dotenv import load_dotenv
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from __future__ import annotations
+
 import io
+import re
+from pathlib import Path
+from typing import Any
 
-load_dotenv()
+import pandas as pd
 
-# ── CONSTANTS ─────────────────────────────────────────────────
-CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
-DRIVE_FOLDER_NAME = os.getenv("DRIVE_FOLDER_NAME", "GPA-MarkSheets")
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# ─── Semester detection patterns (evaluated in order, first match wins) ────────
+# Each tuple: (compiled regex, capturing group index for the digit)
+_SEM_PATTERNS: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"^[Ss](\d)\b"),               1),   # S1, S2 … S8  at start
+    (re.compile(r"\bSem(?:ester)?[\s_-]?(\d)", re.I), 1),  # Sem1, Semester_2
+    (re.compile(r"(\d)(?:st|nd|rd|th)\b", re.I),      1),  # 1st, 2nd …
+    (re.compile(r"[-_\s](\d)[-_\s.]"),         1),   # word-3-word
+    (re.compile(r"_S(\d)[A-Z_]"),              1),   # _S3_ interior
+]
 
-MIME_FOLDER = "application/vnd.google-apps.folder"
-MIME_XLSX   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-MIME_CSV    = "text/csv"
-SUPPORTED_MIMES = [MIME_XLSX, MIME_CSV]
+# ─── Column alias map ─────────────────────────────────────────────────────────
+_COL_ALIASES: dict[str, list[str]] = {
+    "student_name"  : ["student name", "name", "student", "sname",
+                       "student_name", "full name", "candidate name"],
+    "roll_no"       : ["roll no", "roll number", "rollno", "roll_no",
+                       "reg no", "registration no", "registration number",
+                       "reg. no", "reg#", "reg number"],
+    "father_name"   : ["father name", "father's name", "fathers name",
+                       "father_name", "guardian name", "parent name", "fname"],
+    "subject_name"  : ["subject name", "subject", "course name", "course",
+                       "subject_name", "paper name", "paper", "paper title"],
+    "total_marks"   : ["total marks", "total", "max marks", "maximum marks",
+                       "full marks", "total_marks", "out of", "max", "max. marks"],
+    "obtained_marks": ["obtained marks", "obtained", "marks", "marks obtained",
+                       "scored", "obtained_marks", "score", "marks scored"],
+    "credit_hours"  : ["credit hours", "credits", "ch", "credit hour",
+                       "credit_hours", "cr. hrs", "cr hrs", "credit hrs"],
+    "department"    : ["department", "dept", "program", "programme",
+                       "faculty", "dept."],
+}
 
-
-# ── FUNCTION 1 ────────────────────────────────────────────────
-def connect_to_drive():
-    """
-    Connects to Google Drive using credentials.json.
-    Returns a Drive service object.
-    """
-    creds_path = Path(CREDENTIALS_PATH)
-
-    if not creds_path.exists():
-        raise FileNotFoundError(
-            f"[ParserAgent] credentials.json not found at: {CREDENTIALS_PATH}\n"
-            f"Download it from Google Cloud Console."
-        )
-
-    credentials = service_account.Credentials.from_service_account_file(
-        CREDENTIALS_PATH,
-        scopes=SCOPES
-    )
-
-    service = build("drive", "v3", credentials=credentials)
-    print("[ParserAgent] ✅ Connected to Google Drive successfully.")
-    return service
-
-
-# ── FUNCTION 2 ────────────────────────────────────────────────
-def find_root_folder(service, folder_name: str) -> str:
-    """
-    Searches Google Drive for the root folder by name.
-    Returns the folder ID.
-    """
-    query = (
-        f"name = '{folder_name}' "
-        f"and mimeType = '{MIME_FOLDER}' "
-        f"and trashed = false"
-    )
-
-    results = service.files().list(
-        q=query,
-        fields="files(id, name)"
-    ).execute()
-
-    folders = results.get("files", [])
-
-    if not folders:
-        raise FileNotFoundError(
-            f"[ParserAgent] Folder '{folder_name}' not found in Google Drive.\n"
-            f"Make sure you created it and shared it with the service account."
-        )
-
-    folder_id = folders[0]["id"]
-    print(f"[ParserAgent] ✅ Found root folder: '{folder_name}' (ID: {folder_id})")
-    return folder_id
+_EXPECTED_FIELDS: list[str] = list(_COL_ALIASES.keys())
 
 
-# ── FUNCTION 3 ────────────────────────────────────────────────
-def crawl_folder_recursively(service, folder_id: str, all_files: list):
-    """
-    Recursively crawls a Google Drive folder.
-    Collects all .xlsx and .csv files no matter how deep.
-    """
-    query = (
-        f"'{folder_id}' in parents "
-        f"and trashed = false"
-    )
+# ─── Private helpers ──────────────────────────────────────────────────────────
 
-    results = service.files().list(
-        q=query,
-        fields="files(id, name, mimeType)"
-    ).execute()
-
-    items = results.get("files", [])
-
-    for item in items:
-        name    = item["name"]
-        mime    = item["mimeType"]
-        file_id = item["id"]
-
-        if mime == MIME_FOLDER:
-            print(f"[ParserAgent] 📁 Entering folder: {name}")
-            crawl_folder_recursively(service, file_id, all_files)
-
-        elif mime in SUPPORTED_MIMES:
-            print(f"[ParserAgent] 📄 Found file: {name}")
-            all_files.append({"id": file_id, "name": name, "mime": mime})
-
-        else:
-            print(f"[ParserAgent] ⏭️  Skipping unsupported file: {name}")
+def _norm(s: str) -> str:
+    """Lowercase + collapse whitespace for fuzzy matching."""
+    return re.sub(r"\s+", " ", str(s).strip().lower())
 
 
-# ── FUNCTION 4 ────────────────────────────────────────────────
-def download_and_parse_file(service, file_info: dict) -> dict:
-    """
-    Downloads one file from Google Drive into a temp folder,
-    parses it, deletes the temp file, returns the result dict.
-    """
-    file_id   = file_info["id"]
-    file_name = file_info["name"]
-    mime      = file_info["mime"]
-
-    print(f"[ParserAgent] ⬇️  Downloading: {file_name}")
-
-    request    = service.files().get_media(fileId=file_id)
-    buffer     = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-
-    buffer.seek(0)
-
-    suffix = ".xlsx" if mime == MIME_XLSX else ".csv"
-
-    with tempfile.NamedTemporaryFile(
-        delete=False, suffix=suffix, prefix="gpa_temp_"
-    ) as tmp_file:
-        tmp_file.write(buffer.read())
-        tmp_path = tmp_file.name
-
-    print(f"[ParserAgent] 💾 Saved temporarily to: {tmp_path}")
-
-    try:
-        if suffix == ".xlsx":
-            result = parse_xlsx_file(tmp_path, file_name)
-        else:
-            result = parse_csv_file(tmp_path, file_name)
-    finally:
-        os.unlink(tmp_path)
-        print(f"[ParserAgent] 🗑️  Deleted temp file: {tmp_path}")
-
+def _map_columns(df_cols: list[str]) -> dict[str, str]:
+    """Return {canonical_field: actual_df_column} for every detectable field."""
+    n2raw = {_norm(c): c for c in df_cols}
+    result: dict[str, str] = {}
+    for field, aliases in _COL_ALIASES.items():
+        for alias in aliases:
+            if alias in n2raw:
+                result[field] = n2raw[alias]
+                break
     return result
 
 
-# ── HELPER: build warnings for one record ────────────────────
-def _build_warnings(record: dict) -> list[str]:
-    """
-    Checks all 8 required fields and returns a list of
-    warning strings for any that are missing or None.
-    Used by both XLSX and CSV parsers so the warning format
-    is always identical — Engineer 2 receives consistent data
-    regardless of file type.
-    """
-    warnings = []
-
-    if not record.get("student_name"):
-        warnings.append("student_name is missing")
-
-    if not record.get("roll_no"):
-        warnings.append("roll_no is missing — student cannot be identified")
-
-    if not record.get("father_name"):
-        warnings.append("father_name is missing")
-
-    if not record.get("subject_name"):
-        warnings.append("subject_name is missing")
-
-    if record.get("total_marks") is None:
-        warnings.append("total_marks is missing")
-
-    if record.get("obtained_marks") is None:
-        warnings.append("obtained_marks is missing — student may be absent")
-
-    if record.get("credit_hours") is None:
-        warnings.append("credit_hours is missing")
-
-    if not record.get("department"):
-        warnings.append("department is missing")
-
-    return warnings
-
-
-# ── FUNCTION 5 ────────────────────────────────────────────────
-def parse_xlsx_file(file_path: str, file_name: str) -> dict:
-    """
-    Parses an .xlsx file using openpyxl.
-    Reads metadata from rows 1-2.
-    Reads ALL student rows from row 4 onward.
-    Never skips incomplete rows — passes everything to
-    Engineer 2 with warnings attached for HITL review.
-    """
-    workbook = openpyxl.load_workbook(file_path, data_only=True)
-    sheet    = workbook.active
-
-    metadata = {
-        "university_info": str(sheet.cell(row=1, column=1).value or "").strip(),
-        "subject_info":    str(sheet.cell(row=2, column=1).value or "").strip(),
-        "sheet_name":      sheet.title,
-        "source_file":     file_name,
+def _find_header_row(df_raw: pd.DataFrame) -> int:
+    """Scan first 12 rows and return the row most likely to be the header."""
+    alias_words: set[str] = {
+        word
+        for aliases in _COL_ALIASES.values()
+        for a in aliases
+        for word in a.split()
     }
+    best_row, best_score = 0, -1
+    for i in range(min(12, len(df_raw))):
+        row_words: set[str] = {
+            word
+            for v in df_raw.iloc[i].values
+            if pd.notna(v)
+            for word in _norm(str(v)).split()
+        }
+        score = len(row_words & alias_words)
+        if score > best_score:
+            best_score, best_row = score, i
+    return best_row
 
-    records = []
 
-    for row in sheet.iter_rows(
-        min_row=4, min_col=1, max_col=8, values_only=True
-    ):
-        # Skip only fully empty rows
-        if all(cell is None for cell in row):
-            continue
+def _prettify_subject(raw: str) -> str:
+    """
+    Convert CamelCase / raw filename segment to a readable subject name.
+    'SoftEng' → 'Soft Eng' | 'DataStructures' → 'Data Structures' | 'OS' → 'OS'
+    """
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw)   # camelCase split
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)  # ABCWord split
+    s = s.replace("_", " ").replace("-", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.title() if len(s) > 2 else s.upper()
 
-        record = {
-            "student_name":   str(row[0]).strip() if row[0] is not None else None,
-            "roll_no":        str(row[1]).strip() if row[1] is not None else None,
-            "father_name":    str(row[2]).strip() if row[2] is not None else None,
-            "subject_name":   str(row[3]).strip() if row[3] is not None else None,
-            "total_marks":    row[4],
-            "obtained_marks": row[5],
-            "credit_hours":   row[6],
-            "department":     str(row[7]).strip() if row[7] is not None else None,
+
+# ─── Public: semester + subject detector ──────────────────────────────────────
+
+def detect_semester_and_subject(filename: str) -> tuple[str | None, str | None]:
+    """
+    Extract semester label and subject hint from a filename.
+
+    Examples
+    --------
+    'S2-English2.xlsx'       → ('Semester 2', 'English 2')
+    'S5-SoftEng.xlsx'        → ('Semester 5', 'Soft Eng')
+    'S4-OS.xlsx'             → ('Semester 4', 'OS')
+    'Semester_3_DS.xlsx'     → ('Semester 3', 'DS')
+    'marks_data.xlsx'        → (None, None)
+    """
+    stem = Path(filename).stem   # drop extension
+
+    # ── 1. Semester detection ─────────────────────────────────────────────────
+    semester_label: str | None = None
+    match_end = 0
+    for pattern, grp in _SEM_PATTERNS:
+        m = pattern.search(stem)
+        if m:
+            n = int(m.group(grp))
+            if 1 <= n <= 8:
+                semester_label = f"Semester {n}"
+                match_end = m.end()
+                break
+
+    # ── 2. Subject extraction (text after the semester token) ─────────────────
+    subject_hint: str | None = None
+    if semester_label and match_end:
+        remainder = re.sub(r"^[-_\s]+", "", stem[match_end:])
+        if remainder:
+            subject_hint = _prettify_subject(remainder)
+
+    return semester_label, subject_hint
+
+
+# ─── Public: file parser ──────────────────────────────────────────────────────
+
+def parse_file_to_records(
+    file_bytes: bytes,
+    filename: str,
+    subject_hint: str | None = None,
+    department: str = "",
+) -> dict[str, Any]:
+    """
+    Parse a single xlsx / csv file and return a standardised result dict.
+
+    Parameters
+    ----------
+    file_bytes   : Raw bytes of the file.
+    filename     : Original filename (used for extension detection only).
+    subject_hint : Subject name to inject when the sheet has no subject column.
+    department   : Department name to inject when the sheet has no dept column.
+
+    Returns
+    -------
+    {
+        "file_name" : str,
+        "status"    : "OK" | "ERROR",
+        "records"   : list[dict],
+        "warnings"  : list[str],
+    }
+    """
+    warnings_out: list[str] = []
+    ext = Path(filename).suffix.lower()
+    buf = io.BytesIO(file_bytes)
+
+    # ── Raw read ──────────────────────────────────────────────────────────────
+    try:
+        df_raw = (
+            pd.read_csv(buf, header=None, dtype=str)
+            if ext == ".csv"
+            else pd.read_excel(buf, header=None, dtype=str, engine="openpyxl")
+        )
+    except Exception as exc:
+        return {"file_name": filename, "status": "ERROR", "records": [],
+                "warnings": [f"Cannot open file: {exc}"]}
+
+    if df_raw.empty:
+        return {"file_name": filename, "status": "ERROR", "records": [],
+                "warnings": ["File appears to be empty."]}
+
+    # ── Detect header row ─────────────────────────────────────────────────────
+    header_idx = _find_header_row(df_raw)
+
+    buf = io.BytesIO(file_bytes)
+    try:
+        df = (
+            pd.read_csv(buf, header=header_idx, dtype=str)
+            if ext == ".csv"
+            else pd.read_excel(buf, header=header_idx, dtype=str, engine="openpyxl")
+        )
+    except Exception as exc:
+        return {"file_name": filename, "status": "ERROR", "records": [],
+                "warnings": [f"Re-read after header detection failed: {exc}"]}
+
+    df.dropna(how="all", inplace=True)
+    df.dropna(axis=1, how="all", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    if header_idx > 0:
+        warnings_out.append(
+            f"Header row detected at row {header_idx + 1}; "
+            f"{header_idx} title row(s) skipped."
+        )
+
+    # ── Column mapping ────────────────────────────────────────────────────────
+    col_map = _map_columns(list(df.columns))
+
+    if not col_map:
+        return {
+            "file_name": filename,
+            "status"   : "ERROR",
+            "records"  : [],
+            "warnings" : [
+                "No recognisable column headers found. "
+                "Expected: Student Name, Roll No, Subject Name, "
+                "Total Marks, Obtained Marks, Credit Hours."
+            ],
         }
 
-        warnings = _build_warnings(record)
-        record["has_issues"]     = len(warnings) > 0
-        record["parse_warnings"] = warnings
+    unmapped = [f for f in _EXPECTED_FIELDS if f not in col_map]
+    if unmapped:
+        warnings_out.append(
+            f"Columns not found (will default to None): {', '.join(unmapped)}."
+        )
 
-        records.append(record)
-
-    return {
-        "status":    "parsed",
-        "file_name": file_name,
-        "file_type": "xlsx",
-        "metadata":  metadata,
-        "row_count": len(records),
-        "records":   records,
-    }
-
-
-# ── FUNCTION 6 ────────────────────────────────────────────────
-def parse_csv_file(file_path: str, file_name: str) -> dict:
-    """
-    Parses a .csv file using pandas.
-    Expects the same 8 columns as the xlsx files.
-
-    FIX APPLIED: Never skips rows — even rows with missing
-    roll_no are passed through with warnings attached.
-    This preserves all student records for HITL review.
-    If we silently skip rows here, those students disappear
-    from the system with no record of why.
-
-    FIX APPLIED: Every record now carries has_issues and
-    parse_warnings — identical structure to XLSX records.
-    Engineer 2 receives consistent data regardless of
-    whether the source file was .xlsx or .csv.
-    """
-    df = pd.read_csv(file_path)
-
-    # Normalize column names
-    df.columns = [
-        col.strip().lower().replace(" ", "_") for col in df.columns
-    ]
-
-    # Skip only rows where every single column is NaN
-    df = df.dropna(how="all")
-
-    records = []
+    # ── Build record list ─────────────────────────────────────────────────────
+    records: list[dict[str, Any]] = []
 
     for _, row in df.iterrows():
-
-        record = {
-            "student_name":   str(row.get("student_name", "")).strip() or None,
-            "roll_no":        str(row.get("roll_no",       "")).strip() or None,
-            "father_name":    str(row.get("father_name",   "")).strip() or None,
-            "subject_name":   str(row.get("subject_name",  "")).strip() or None,
-            "total_marks":    row.get("total_marks",    None) if pd.notna(row.get("total_marks",    None)) else None,
-            "obtained_marks": row.get("obtained_marks", None) if pd.notna(row.get("obtained_marks", None)) else None,
-            "credit_hours":   row.get("credit_hours",   None) if pd.notna(row.get("credit_hours",   None)) else None,
-            "department":     str(row.get("department",    "")).strip() or None,
+        rec: dict[str, Any] = {
+            "student_name"  : None,
+            "roll_no"       : None,
+            "father_name"   : None,
+            "subject_name"  : subject_hint,   # pre-fill from filename hint
+            "total_marks"   : None,
+            "obtained_marks": None,
+            "credit_hours"  : None,
+            "department"    : department or None,
+            "has_issues"    : False,
+            "parse_warnings": [],
         }
 
-        # Same warning system as XLSX — consistent for Engineer 2
-        warnings = _build_warnings(record)
-        record["has_issues"]     = len(warnings) > 0
-        record["parse_warnings"] = warnings
+        all_null = True
+        for field, col in col_map.items():
+            raw = row.get(col)
+            if pd.isna(raw) or str(raw).strip() in ("", "nan", "NaN", "None"):
+                continue
+            all_null = False
+            val = str(raw).strip()
 
-        records.append(record)
+            if field in ("total_marks", "obtained_marks"):
+                try:
+                    rec[field] = float(val)
+                except ValueError:
+                    rec[field] = val           # keep raw; validator will flag EC-16/EC-20
+                    rec["has_issues"] = True
+                    rec["parse_warnings"].append(
+                        f"'{val}' is not numeric for '{field}'."
+                    )
+            elif field == "credit_hours":
+                try:
+                    rec[field] = int(float(val))
+                except ValueError:
+                    rec[field] = val
+                    rec["has_issues"] = True
+                    rec["parse_warnings"].append(
+                        f"'{val}' is not an integer for 'credit_hours'."
+                    )
+            else:
+                rec[field] = val
+
+        if all_null:
+            continue   # skip blank rows silently
+
+        records.append(rec)
 
     return {
-        "status":    "parsed",
-        "file_name": file_name,
-        "file_type": "csv",
-        "metadata":  {"source_file": file_name},
-        "row_count": len(records),
-        "records":   records,
+        "file_name": filename,
+        "status"   : "OK" if records else "ERROR",
+        "records"  : records,
+        "warnings" : warnings_out,
     }
 
 
-# ── FUNCTION 7 ────────────────────────────────────────────────
-def parse_drive_files(folder_name: str = None) -> list[dict]:
+# ─── LangGraph Node 2 ─────────────────────────────────────────────────────────
+
+def parser_agent_node(state: dict[str, Any]) -> dict[str, Any]:
     """
-    MASTER FUNCTION — LangGraph calls this as Node 2.
+    LangGraph pipeline node.
 
-    Full pipeline:
-    1. Connect to Google Drive
-    2. Find the root folder
-    3. Crawl all folders recursively
-    4. Download, parse, delete each file
-    5. Return all results as a list of dicts
+    Reads from state
+    ----------------
+    uploaded_files : list[dict]  with keys:
+                       file_name, file_bytes, subject_hint (optional),
+                       department (optional)
+
+    Writes to state
+    ---------------
+    parsed_files : list[dict]  — one result dict per uploaded file
     """
-    folder_name = folder_name or DRIVE_FOLDER_NAME
+    uploaded: list[dict[str, Any]] = state.get("uploaded_files", [])
+    results: list[dict[str, Any]] = []
 
-    service        = connect_to_drive()
-    root_folder_id = find_root_folder(service, folder_name)
+    for f in uploaded:
+        result = parse_file_to_records(
+            file_bytes   = f["file_bytes"],
+            filename     = f["file_name"],
+            subject_hint = f.get("subject_hint"),
+            department   = f.get("department", ""),
+        )
+        results.append(result)
 
-    all_files = []
-    crawl_folder_recursively(service, root_folder_id, all_files)
-
-    if not all_files:
-        print(f"[ParserAgent] ⚠️  No Excel or CSV files found in '{folder_name}'.")
-        return []
-
-    print(f"\n[ParserAgent] 📊 Total files found: {len(all_files)}")
-
-    all_results = []
-    for file_info in all_files:
-        try:
-            result = download_and_parse_file(service, file_info)
-            all_results.append(result)
-            print(
-                f"[ParserAgent] ✅ Parsed '{file_info['name']}' "
-                f"— {result['row_count']} rows\n"
-            )
-        except Exception as e:
-            print(f"[ParserAgent] ❌ Failed to parse '{file_info['name']}': {e}\n")
-            continue
-
-    print(f"[ParserAgent] 🎉 Done! Parsed {len(all_results)} files successfully.")
-    return all_results
-
-
-# ── QUICK TEST ────────────────────────────────────────────────
-if __name__ == "__main__":
-    import json
-    results = parse_drive_files()
-    for r in results:
-        print(json.dumps({
-            "file":      r["file_name"],
-            "rows":      r["row_count"],
-            "first_row": r["records"][0] if r["records"] else None
-        }, indent=2, ensure_ascii=False))
-        
-        #python src/agents/parser_agent.py
+    state["parsed_files"] = results
+    return state
