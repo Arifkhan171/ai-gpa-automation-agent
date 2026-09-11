@@ -1,12 +1,3485 @@
+# # """
+# # src/dashboard/app.py
+# # ====================
+# # University of Loralai — CS Department
+# # Enterprise HITL GPA Calculation Dashboard  |  Tech Lead: Arif Khan
+
+# # Strict file naming convention: S{N}-{Subject}.xlsx / .csv
+# #   • S1-Calculus.xlsx  → Semester 1, subject "Calculus"
+# #   • S2-DataStructures.csv → Semester 2, subject "Data Structures"
+
+# # Files NOT matching this format are rejected at upload time with a clear
+# # error — the system never crashes on invalid filenames.
+
+# # Per-file validation prevents false duplicate-roll-no alerts when multiple
+# # subject files belong to the same semester.
+
+# # Semester tabs give simultaneous access to all semesters under review.
+
+# # Historical CGPA: when processing Semester 2 (or later), the calculator
+# # automatically reads historical SemesterGPA rows already in the DB — no
+# # need to re-upload previous semester data.
+
+# # Run from project root:
+# #     streamlit run src/dashboard/app.py
+# # """
+
+# # from __future__ import annotations
+
+# # import io
+# # import os
+# # import re
+# # import sys
+# # from datetime import datetime
+# # from pathlib import Path
+# # from typing import Any
+
+# # import pandas as pd
+# # import streamlit as st
+# # from dotenv import load_dotenv
+
+# # load_dotenv()
+
+# # # ─── Path: ensure project root is resolvable ──────────────────────────────────
+# # _ROOT = Path(__file__).resolve().parent.parent.parent
+# # if str(_ROOT) not in sys.path:
+# #     sys.path.insert(0, str(_ROOT))
+
+# # # ─── Agent imports (fail-safe: UI still boots even if one module is broken) ───
+# # _ERRORS: list[str] = []
+
+# # try:
+# #     from src.agents.parser_agent import (
+# #         detect_semester_and_subject,
+# #         parse_file_to_records,
+# #         _prettify_subject,          # reused for subject name formatting
+# #     )
+# #     _PARSER_OK = True
+# # except Exception as _e:
+# #     _PARSER_OK = False
+# #     _ERRORS.append(f"parser_agent → {_e}")
+
+# # try:
+# #     from src.agents.validation_agent import validate_records
+# #     _VALIDATOR_OK = True
+# # except Exception as _e:
+# #     _VALIDATOR_OK = False
+# #     _ERRORS.append(f"validation_agent → {_e}")
+
+# # try:
+# #     from src.agents.calculator_agent import calculator_agent_node, get_engine
+# #     from src.models.database_models import Student, Subject, Mark, SemesterGPA, CGPA
+# #     from sqlalchemy.orm import Session
+# #     from sqlalchemy import select as sa_select
+# #     _CALC_OK = True
+# # except Exception as _e:
+# #     _CALC_OK = False
+# #     _ERRORS.append(f"calculator_agent / database_models → {_e}")
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # PAGE CONFIG  (must be the first Streamlit call)
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # st.set_page_config(
+# #     page_title   = "GPA Dashboard — University of Loralai",
+# #     page_icon    = "🎓",
+# #     layout       = "wide",
+# #     initial_sidebar_state = "expanded",
+# # )
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # ENTERPRISE DESIGN SYSTEM
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # st.markdown("""
+# # <style>
+# # html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
+# # .stApp { background-color: #EEF2F7; }
+# # section[data-testid="stSidebar"] {
+# #     background: linear-gradient(180deg, #0B1E3D 0%, #122B52 60%, #0F2444 100%);
+# #     border-right: 1px solid #1E3A6E;
+# # }
+# # section[data-testid="stSidebar"] * { color: #CBD5E1 !important; }
+# # section[data-testid="stSidebar"] .sidebar-title { color:#F1F5F9!important;font-size:1.05rem;font-weight:700; }
+# # section[data-testid="stSidebar"] hr { border-color: #1E3A6E !important; }
+# # .card { background:#FFFFFF;border-radius:12px;padding:24px 28px;
+# #         box-shadow:0 1px 4px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.04);
+# #         border:1px solid #E2E8F0;margin-bottom:18px; }
+# # .card-sm { background:#FFFFFF;border-radius:10px;padding:16px 20px;
+# #            box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid #E2E8F0;margin-bottom:12px; }
+# # .stage-title  { font-size:1.55rem;font-weight:800;color:#0F2444;letter-spacing:-.5px;margin-bottom:4px; }
+# # .stage-subtitle { font-size:.9rem;color:#64748B;margin-bottom:24px;font-weight:400; }
+# # .section-label { font-size:.7rem;font-weight:700;letter-spacing:1.2px;
+# #                  text-transform:uppercase;color:#94A3B8;margin-bottom:8px; }
+# # .banner { border-radius:8px;padding:12px 18px;font-weight:600;font-size:.9rem;
+# #           margin:10px 0;display:flex;align-items:center;gap:10px;line-height:1.5; }
+# # .banner-critical { background:linear-gradient(135deg,#FEF2F2,#FEE2E2);border:1px solid #FECACA;
+# #                    border-left:4px solid #DC2626;color:#7F1D1D; }
+# # .banner-warning  { background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border:1px solid #FDE68A;
+# #                    border-left:4px solid #D97706;color:#78350F; }
+# # .banner-success  { background:linear-gradient(135deg,#F0FDF4,#DCFCE7);border:1px solid #BBF7D0;
+# #                    border-left:4px solid #16A34A;color:#14532D; }
+# # .banner-info     { background:linear-gradient(135deg,#EFF6FF,#DBEAFE);border:1px solid #BFDBFE;
+# #                    border-left:4px solid #2563EB;color:#1E3A8A; }
+# # .badge { display:inline-block;border-radius:20px;padding:2px 10px;
+# #          font-size:.72rem;font-weight:700;letter-spacing:.3px;vertical-align:middle; }
+# # .badge-blocked { background:#FEE2E2;color:#B91C1C;border:1px solid #FECACA; }
+# # .badge-flagged { background:#FEF3C7;color:#B45309;border:1px solid #FDE68A; }
+# # .badge-clean   { background:#DCFCE7;color:#15803D;border:1px solid #BBF7D0; }
+# # .badge-info    { background:#DBEAFE;color:#1D4ED8;border:1px solid #BFDBFE; }
+# # .kpi-box { background:#FFFFFF;border-radius:12px;padding:20px 24px;text-align:center;
+# #            box-shadow:0 1px 4px rgba(0,0,0,.06);border:1px solid #E2E8F0; }
+# # .kpi-value { font-size:2.2rem;font-weight:800;color:#0F2444;line-height:1.1; }
+# # .kpi-label { font-size:.78rem;font-weight:600;color:#64748B;
+# #              text-transform:uppercase;letter-spacing:.8px;margin-top:6px; }
+# # .file-chip { display:inline-flex;align-items:center;gap:6px;background:#F8FAFC;
+# #              border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;
+# #              font-size:.8rem;color:#374151;margin:3px; }
+# # .gpa-table { width:100%;border-collapse:collapse;font-size:.85rem; }
+# # .gpa-table th { background:#0F2444;color:#F1F5F9;padding:10px 14px;text-align:center;
+# #                 font-weight:600;font-size:.75rem;letter-spacing:.5px;white-space:nowrap; }
+# # .gpa-table td { padding:9px 14px;text-align:center;border-bottom:1px solid #F1F5F9;color:#374151; }
+# # .gpa-table tr:hover td { background:#F8FAFC; }
+# # .gpa-table td.name-col { text-align:left;font-weight:600;color:#0F2444; }
+# # .gpa-table td.roll-col { text-align:left;color:#64748B;font-size:.8rem; }
+# # .gpa-high { background:#DCFCE7!important;color:#166534;font-weight:700;border-radius:6px; }
+# # .gpa-mid  { background:#FEF3C7!important;color:#92400E;font-weight:600;border-radius:6px; }
+# # .gpa-low  { background:#FEE2E2!important;color:#991B1B;font-weight:600;border-radius:6px; }
+# # .gpa-dash { color:#CBD5E1; }
+# # .sb-step   { padding:6px 0;font-size:.85rem;display:flex;align-items:center;gap:8px; }
+# # .sb-done   { color:#4ADE80!important; }
+# # .sb-active { color:#60A5FA!important;font-weight:700!important; }
+# # .sb-pending{ color:#475569!important; }
+# # .sb-sem    { font-size:.8rem;display:flex;align-items:center;gap:6px;padding:4px 0;
+# #              border-bottom:1px solid rgba(255,255,255,.07); }
+# # .upload-zone { border:2px dashed #CBD5E1;border-radius:12px;padding:40px;
+# #                text-align:center;background:#F8FAFC;margin-bottom:16px; }
+# # .upload-zone h3 { color:#0F2444;margin:0 0 8px 0;font-size:1.1rem; }
+# # .upload-zone p  { color:#64748B;margin:0;font-size:.88rem; }
+# # .divider { border:none;border-top:1px solid #E2E8F0;margin:20px 0; }
+# # .block-container { padding-top:2rem!important; }
+# # /* Per-file section separator */
+# # .file-section { border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;
+# #                 margin-bottom:14px;background:#FAFBFC; }
+# # .file-section-header { font-size:.82rem;font-weight:700;color:#0F2444;
+# #                        display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+# # /* Historical banner */
+# # .hist-banner { background:linear-gradient(135deg,#F0F9FF,#E0F2FE);border:1px solid #BAE6FD;
+# #                border-left:4px solid #0284C7;border-radius:8px;padding:12px 18px;
+# #                margin:10px 0;color:#0C4A6E; }
+# # </style>
+# # """, unsafe_allow_html=True)
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # CONSTANTS
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # EXPECTED_STRENGTH: dict[str, int] = {
+# #     "Semester 1": 20, "Semester 2": 20, "Semester 3": 20, "Semester 4": 19,
+# #     "Semester 5": 18, "Semester 6": 18, "Semester 7": 18, "Semester 8": 18,
+# # }
+# # ALL_SEMESTERS = list(EXPECTED_STRENGTH.keys())
+# # DEFAULT_DB    = os.getenv("DATABASE_URL", "sqlite:///./gpa_system.db")
+
+# # EDITOR_COLS = [
+# #     "student_name", "roll_no", "father_name",
+# #     "subject_name", "total_marks", "obtained_marks",
+# #     "credit_hours", "department",
+# # ]
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STRICT FILE NAMING VALIDATION
+# # # Required: S{1-8}-{SubjectName}.xlsx  or  S{1-8}-{SubjectName}.csv
+# # # Examples: S1-Calculus.xlsx  S2-DataStructures.csv  S5-SoftEng.xlsx
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # _STRICT_FILE_RE = re.compile(r"^S([1-8])-(.+)\.(xlsx|csv)$", re.IGNORECASE)
+
+
+# # def validate_filename(filename: str) -> tuple[bool, str]:
+# #     """
+# #     Returns (is_valid, error_message_or_empty).
+# #     Accepts: S1-Calculus.xlsx, S2-DataStructures.csv, s3-OS.xlsx
+# #     Rejects: Calculus.xlsx, marks.xlsx, S-Calculus.xlsx, S9-Math.xlsx
+# #     """
+# #     m = _STRICT_FILE_RE.match(filename)
+# #     if not m:
+# #         return False, (
+# #             f"**{filename}** — invalid name. Required format: "
+# #             f"**S{{N}}-{{SubjectName}}.xlsx** "
+# #             f"(e.g. `S1-Calculus.xlsx`, `S2-DataStructures.csv`). "
+# #             f"Rename the file and re-upload."
+# #         )
+# #     return True, ""
+
+
+# # def _extract_sem_subject(filename: str) -> tuple[str, str]:
+# #     """
+# #     Parse semester label and prettified subject from a *valid* filename.
+# #     Always call validate_filename() first.
+# #     """
+# #     m = _STRICT_FILE_RE.match(filename)
+# #     n     = int(m.group(1))
+# #     raw   = m.group(2)
+# #     # Use parser_agent._prettify_subject if available, else simple title
+# #     try:
+# #         subject = _prettify_subject(raw)
+# #     except Exception:
+# #         subject = re.sub(r"[-_]+", " ", raw).strip().title()
+# #     return f"Semester {n}", subject
+
+
+# # def _safe_key(s: str) -> str:
+# #     """Convert any string to a safe Streamlit widget key (no spaces/special chars)."""
+# #     return re.sub(r"[^a-zA-Z0-9]", "_", s)
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # UTILITY FUNCTIONS
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def sem_num(label: str) -> int:
+# #     m = re.search(r"(\d+)", label)
+# #     return int(m.group(1)) if m else 0
+
+
+# # def fmt_size(b: int) -> str:
+# #     return f"{b/1024:.1f} KB" if b < 1_048_576 else f"{b/1_048_576:.1f} MB"
+
+
+# # def records_to_df(records: list[dict]) -> pd.DataFrame:
+# #     rows = [{c: r.get(c) for c in EDITOR_COLS} for r in records]
+# #     df = pd.DataFrame(rows, columns=EDITOR_COLS)
+# #     for col in ("total_marks", "obtained_marks"):
+# #         df[col] = pd.to_numeric(df[col], errors="coerce")
+# #     df["credit_hours"] = pd.to_numeric(df["credit_hours"], errors="coerce")
+# #     return df
+
+
+# # def df_to_records(df: pd.DataFrame) -> list[dict]:
+# #     out: list[dict] = []
+# #     for _, row in df.iterrows():
+# #         rec: dict[str, Any] = {"has_issues": False, "parse_warnings": []}
+# #         for col in EDITOR_COLS:
+# #             val = row.get(col)
+# #             is_null = (val is None
+# #                        or (isinstance(val, float) and pd.isna(val))
+# #                        or str(val).strip() in ("", "nan", "None", "NaT"))
+# #             if is_null:
+# #                 rec[col] = None
+# #                 continue
+# #             if col in ("total_marks", "obtained_marks"):
+# #                 try:
+# #                     rec[col] = float(val)
+# #                 except (ValueError, TypeError):
+# #                     rec[col] = str(val)
+# #                     rec["has_issues"] = True
+# #                     rec["parse_warnings"].append(f"'{val}' not numeric for {col}.")
+# #             elif col == "credit_hours":
+# #                 try:
+# #                     rec[col] = int(float(val))
+# #                 except (ValueError, TypeError):
+# #                     rec[col] = str(val)
+# #                     rec["has_issues"] = True
+# #                     rec["parse_warnings"].append(f"'{val}' not integer for credit_hours.")
+# #             else:
+# #                 rec[col] = str(val).strip()
+# #         out.append(rec)
+# #     return out
+
+
+# # def infer_academic_year(sn: int) -> str:
+# #     override = st.session_state.get("academic_year", "").strip()
+# #     if override:
+# #         return override
+# #     y = datetime.now().year - (sn - 1) // 2
+# #     return f"{y}-{y + 1}"
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # SESSION STATE
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def _init() -> None:
+# #     defaults: dict[str, Any] = {
+# #         "stage"           : "upload",
+# #         "raw_files"       : {},          # {fname: bytes}
+# #         "file_assignments": {},          # {fname: "Semester N"}
+# #         "file_subjects"   : {},          # {fname: subject_hint_str}
+# #         "semester_groups" : {},          # {sem: [fname, …]}
+# #         "sem_file_records": {},          # {sem: {fname: list[dict]}}  — per-file raw records
+# #         "sem_file_dfs"    : {},          # {sem: {fname: pd.DataFrame}} — per-file editors
+# #         "sem_records"     : {},          # {sem: list[dict]}  — combined for calculator
+# #         "approvals"       : {},          # {sem: bool}
+# #         "val_reports"     : {},          # {sem: report_dict}  (legacy compat)
+# #         "ordered_sems"    : [],
+# #         "calc_results"    : None,
+# #         "final_saved"     : False,
+# #         "db_url"          : DEFAULT_DB,
+# #         "academic_year"   : "",
+# #         "invalid_files"   : [],          # [(fname, error_msg)] rejected on upload
+# #     }
+# #     for k, v in defaults.items():
+# #         st.session_state.setdefault(k, v)
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # SIDEBAR
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_sidebar() -> None:
+# #     with st.sidebar:
+# #         st.markdown("""
+# #         <div style="padding:16px 0 8px 0">
+# #             <div style="font-size:1.4rem;font-weight:800;color:#F1F5F9;letter-spacing:-.5px">
+# #                 🎓 GPA System
+# #             </div>
+# #             <div style="font-size:.75rem;color:#94A3B8;margin-top:2px">
+# #                 University of Loralai · CS Dept
+# #             </div>
+# #         </div>""", unsafe_allow_html=True)
+# #         st.divider()
+
+# #         st.markdown('<div class="section-label" style="color:#475569">Pipeline</div>',
+# #                     unsafe_allow_html=True)
+# #         stages  = ["upload", "assign", "review", "calculate", "results"]
+# #         labels  = ["Upload Files", "Confirm Assignments", "HITL Review (Tabs)",
+# #                    "GPA Calculation", "Results & Save"]
+# #         icons   = ["📁", "🗂️", "📋", "⚙️", "📊"]
+# #         cur     = st.session_state.stage
+# #         cur_idx = stages.index(cur)
+
+# #         for i, (s, lbl, ico) in enumerate(zip(stages, labels, icons)):
+# #             cls    = ("sb-step sb-done" if i < cur_idx
+# #                       else "sb-step sb-active" if i == cur_idx
+# #                       else "sb-step sb-pending")
+# #             prefix = "✓" if i < cur_idx else "▶" if i == cur_idx else "○"
+# #             st.markdown(
+# #                 f'<div class="{cls}"><span style="font-size:1rem">{ico}</span>'
+# #                 f'<span>{prefix} {lbl}</span></div>',
+# #                 unsafe_allow_html=True,
+# #             )
+
+# #         st.divider()
+
+# #         ordered = st.session_state.ordered_sems
+# #         if ordered:
+# #             st.markdown('<div class="section-label" style="color:#475569">Semester Status</div>',
+# #                         unsafe_allow_html=True)
+# #             for sem in ordered:
+# #                 ok    = st.session_state.approvals.get(sem, False)
+# #                 files = st.session_state.semester_groups.get(sem, [])
+# #                 icon  = "✅" if ok else "🔵"
+# #                 st.markdown(
+# #                     f'<div class="sb-sem"><span>{icon}</span>'
+# #                     f'<span style="flex:1;font-size:.8rem">{sem}</span>'
+# #                     f'<span style="font-size:.7rem;color:#475569">{len(files)} file(s)</span>'
+# #                     f'</div>',
+# #                     unsafe_allow_html=True,
+# #                 )
+# #             st.divider()
+
+# #         st.markdown('<div class="section-label" style="color:#475569">System Health</div>',
+# #                     unsafe_allow_html=True)
+
+# #         def _health(ok: bool, label: str) -> None:
+# #             c, dot = ("#4ADE80", "●") if ok else ("#F87171", "●")
+# #             st.markdown(
+# #                 f'<div class="sb-step"><span style="color:{c}">{dot}</span>'
+# #                 f'<span>{label}</span></div>',
+# #                 unsafe_allow_html=True,
+# #             )
+
+# #         _health(_PARSER_OK,    "Parser Agent")
+# #         _health(_VALIDATOR_OK, "Validation Agent")
+# #         _health(_CALC_OK,      "Calculator Agent")
+
+# #         if _ERRORS:
+# #             with st.expander("⚠️ Import Errors"):
+# #                 for e in _ERRORS:
+# #                     st.error(e, icon="🚫")
+
+# #         st.divider()
+
+# #         with st.expander("⚙️ Settings"):
+# #             st.session_state.db_url = st.text_input(
+# #                 "Database URL", value=st.session_state.db_url,
+# #                 help="SQLite (dev) or PostgreSQL (prod)"
+# #             )
+# #             st.session_state.academic_year = st.text_input(
+# #                 "Academic Year", value=st.session_state.academic_year,
+# #                 placeholder="e.g. 2024-2025", help="Leave blank to auto-infer"
+# #             )
+
+# #         st.markdown(
+# #             '<div style="font-size:.7rem;color:#475569;margin-top:12px">'
+# #             'v2.0 · HEC Pakistan GPA Standard</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STAGE 0 — UPLOAD  (strict S{N}-Subject.xlsx naming enforced here)
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_upload() -> None:
+# #     st.markdown('<div class="stage-title">📁 Upload Mark Sheet Files</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         '<div class="stage-subtitle">'
+# #         'Every file <b>must</b> be named <code>S{N}-{Subject}.xlsx</code> where '
+# #         '<b>N</b> is the semester number (1–8). Examples: '
+# #         '<code>S1-Calculus.xlsx</code>, <code>S2-DataStructures.csv</code>, '
+# #         '<code>S5-SoftEng.xlsx</code>. Files not matching this format are '
+# #         'rejected immediately — no crash, just a clear error message.'
+# #         '</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     uploaded = st.file_uploader(
+# #         "Drop mark sheet files here",
+# #         type=["xlsx", "csv"],
+# #         accept_multiple_files=True,
+# #         label_visibility="collapsed",
+# #     )
+
+# #     with st.expander("📊 HOD Ground-Truth Student Strength Baseline"):
+# #         cols = st.columns(4)
+# #         for i, (sem, n) in enumerate(EXPECTED_STRENGTH.items()):
+# #             cols[i % 4].metric(sem, f"{n} students")
+
+# #     if not uploaded:
+# #         st.markdown("""
+# #         <div class="upload-zone">
+# #             <h3>📂 No files uploaded yet</h3>
+# #             <p>Required naming: <b>S{N}-{Subject}.xlsx</b><br>
+# #                Examples: S1-Calculus.xlsx · S2-Physics.csv · S3-DataStructures.xlsx<br>
+# #                Upload one file per subject per semester.</p>
+# #         </div>""", unsafe_allow_html=True)
+# #         return
+
+# #     # ── Strict filename validation ─────────────────────────────────────────────
+# #     valid_files  : dict[str, bytes]        = {}
+# #     invalid_files: list[tuple[str, str]]   = []
+
+# #     for uf in uploaded:
+# #         ok, err = validate_filename(uf.name)
+# #         if ok:
+# #             valid_files[uf.name] = uf.read()
+# #         else:
+# #             invalid_files.append((uf.name, err))
+
+# #     # Show rejected files prominently
+# #     if invalid_files:
+# #         st.markdown('<div class="card">', unsafe_allow_html=True)
+# #         st.markdown(
+# #             '<div class="section-label">❌ Rejected Files — Invalid Naming</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         for fname, err in invalid_files:
+# #             st.error(err, icon="🚫")
+# #         st.markdown(
+# #             '<div style="font-size:.84rem;color:#7F1D1D;margin-top:8px;padding:8px 12px;'
+# #             'background:#FEF2F2;border-radius:6px">'
+# #             '💡 <b>How to fix:</b> Rename the file to <code>S1-SubjectName.xlsx</code> '
+# #             'and re-upload. The number after <code>S</code> must be 1–8.'
+# #             '</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         st.markdown('</div>', unsafe_allow_html=True)
+
+# #     if not valid_files:
+# #         st.warning(
+# #             "No valid files to process. Please rename all files to "
+# #             "**S{N}-Subject.xlsx** format and re-upload.",
+# #             icon="⚠️",
+# #         )
+# #         return
+
+# #     # ── Auto-detect semester + subject from valid filenames ────────────────────
+# #     # Since naming is strict, detection is 100% reliable.
+# #     auto_sem: dict[str, str] = {}
+# #     auto_sub: dict[str, str] = {}
+# #     for fname in valid_files:
+# #         sem_label, subject = _extract_sem_subject(fname)
+# #         auto_sem[fname] = sem_label
+# #         auto_sub[fname] = subject
+
+# #     # ── Summary metrics ────────────────────────────────────────────────────────
+# #     sem_groups_preview: dict[str, list[str]] = {}
+# #     for fname, sem in auto_sem.items():
+# #         sem_groups_preview.setdefault(sem, []).append(fname)
+
+# #     c1, c2, c3, c4 = st.columns(4)
+# #     c1.metric("Valid Files",        len(valid_files))
+# #     c2.metric("Rejected Files",     len(invalid_files),
+# #               delta=f"−{len(invalid_files)}" if invalid_files else None,
+# #               delta_color="inverse" if invalid_files else "off")
+# #     c3.metric("Semesters Detected", len(sem_groups_preview))
+# #     c4.metric("Subjects Total",     len(valid_files))
+
+# #     st.markdown(
+# #         '<div class="banner banner-success">✅ All valid files have been '
+# #         'automatically assigned to semesters from their filenames. '
+# #         'Review assignments on the next step.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     # ── File list ──────────────────────────────────────────────────────────────
+# #     st.markdown('<div class="section-label" style="margin-top:16px">Detected Files</div>',
+# #                 unsafe_allow_html=True)
+# #     hdr = st.columns([3, 1.2, 2, 2.2])
+# #     for i, lbl in enumerate(("Filename", "Size", "Semester", "Subject")):
+# #         hdr[i].markdown(
+# #             f'<div style="font-size:.75rem;font-weight:700;color:#64748B;'
+# #             f'text-transform:uppercase;letter-spacing:.8px">{lbl}</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+# #     for fname, data in valid_files.items():
+# #         c = st.columns([3, 1.2, 2, 2.2])
+# #         c[0].markdown(f'<div class="file-chip">📄 {fname}</div>', unsafe_allow_html=True)
+# #         c[1].markdown(f'<span style="font-size:.82rem;color:#64748B">{fmt_size(len(data))}</span>',
+# #                       unsafe_allow_html=True)
+# #         c[2].markdown(f'<span class="badge badge-clean">✓ {auto_sem[fname]}</span>',
+# #                       unsafe_allow_html=True)
+# #         c[3].markdown(f'<span style="font-size:.82rem;color:#374151">{auto_sub[fname]}</span>',
+# #                       unsafe_allow_html=True)
+
+# #     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+# #     if st.button("Next → Confirm Assignments", type="primary", use_container_width=True):
+# #         st.session_state.raw_files        = valid_files
+# #         st.session_state.file_assignments = dict(auto_sem)
+# #         st.session_state.file_subjects    = dict(auto_sub)
+# #         st.session_state.invalid_files    = invalid_files
+# #         st.session_state.stage            = "assign"
+# #         st.rerun()
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STAGE 1 — ASSIGN  (confirmation only — semester is fixed by filename)
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_assign() -> None:
+# #     st.markdown('<div class="stage-title">🗂️ Confirm Semester Assignments</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         '<div class="stage-subtitle">Semester assignments are derived from filenames '
+# #         '(e.g. <code>S1-Calculus.xlsx</code> → Semester 1). '
+# #         'You may edit the subject name hint if needed. '
+# #         'Click <b>Begin HITL Review</b> when ready.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     raw      = st.session_state.raw_files
+# #     assigns  = st.session_state.file_assignments     # {fname: "Semester N"} — fixed
+# #     subjects = dict(st.session_state.file_subjects)  # mutable local copy
+
+# #     # ── Confirmation table ─────────────────────────────────────────────────────
+# #     st.markdown('<div class="card">', unsafe_allow_html=True)
+# #     st.markdown('<div class="section-label">File Assignment (Read-Only Semester, Editable Subject)</div>',
+# #                 unsafe_allow_html=True)
+
+# #     for fname, data in raw.items():
+# #         col_f, col_sz, col_sem, col_sub = st.columns([3, 1, 2, 2.5])
+# #         col_f.markdown(
+# #             f'<div style="padding-top:8px"><span class="file-chip">📄 {fname}</span></div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         col_sz.markdown(
+# #             f'<div style="padding-top:10px;font-size:.8rem;color:#64748B">{fmt_size(len(data))}</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         col_sem.markdown(
+# #             f'<div style="padding-top:10px">'
+# #             f'<span class="badge badge-clean">🔒 {assigns.get(fname, "?")}</span></div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         sub_val = col_sub.text_input(
+# #             f"sub_{fname}",
+# #             value=subjects.get(fname) or "",
+# #             placeholder="Subject name hint",
+# #             label_visibility="collapsed",
+# #             key=f"sub_inp_{fname}",
+# #         )
+# #         subjects[fname] = sub_val.strip() or subjects.get(fname) or ""
+
+# #     st.markdown('</div>', unsafe_allow_html=True)
+
+# #     # ── Summary by semester ────────────────────────────────────────────────────
+# #     sem_groups: dict[str, list[str]] = {}
+# #     for fname, sem in assigns.items():
+# #         sem_groups.setdefault(sem, []).append(fname)
+
+# #     st.markdown('<div class="section-label" style="margin-top:8px">Assignment Summary</div>',
+# #                 unsafe_allow_html=True)
+# #     cols = st.columns(min(len(sem_groups) or 1, 4))
+# #     for i, (sem, files) in enumerate(sorted(sem_groups.items(), key=lambda x: sem_num(x[0]))):
+# #         expected = EXPECTED_STRENGTH.get(sem, 0)
+# #         cols[i % 4].markdown(f"""<div class="kpi-box">
+# #             <div class="kpi-value">{len(files)}</div>
+# #             <div class="kpi-label">{sem}</div>
+# #             <div style="font-size:.75rem;color:#94A3B8;margin-top:4px">
+# #                 {len(files)} subject file(s) · Expected {expected} students
+# #             </div></div>""", unsafe_allow_html=True)
+
+# #     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+# #     bc1, bc2 = st.columns([1, 5])
+# #     with bc1:
+# #         if st.button("← Back", use_container_width=True):
+# #             st.session_state.stage = "upload"
+# #             st.rerun()
+# #     with bc2:
+# #         if st.button("Begin HITL Review →", type="primary", use_container_width=True):
+# #             ordered = sorted(sem_groups.keys(), key=sem_num)
+# #             st.session_state.file_subjects    = subjects
+# #             st.session_state.semester_groups  = sem_groups
+# #             st.session_state.ordered_sems     = ordered
+# #             st.session_state.approvals        = {}
+# #             st.session_state.sem_file_records = {}
+# #             st.session_state.sem_file_dfs     = {}
+# #             st.session_state.sem_records      = {}
+# #             st.session_state.val_reports      = {}
+# #             st.session_state.calc_results     = None
+# #             st.session_state.final_saved      = False
+# #             st.session_state.stage            = "review"
+# #             st.rerun()
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STAGE 2 — REVIEW  (tab-based — one tab per semester, all visible at once)
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_review() -> None:
+# #     ordered = st.session_state.ordered_sems
+# #     if not ordered:
+# #         st.session_state.stage = "calculate"
+# #         st.rerun()
+# #         return
+
+# #     approved_count = sum(1 for s in ordered if st.session_state.approvals.get(s, False))
+# #     total          = len(ordered)
+
+# #     st.markdown('<div class="stage-title">📋 HITL Review — Semester Tabs</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         f'<div class="stage-subtitle">Each tab is one semester. '
+# #         f'Validate each file independently, fix any BLOCKED errors, then approve. '
+# #         f'<b>{approved_count} / {total}</b> semesters approved.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     # Overall progress banner
+# #     if approved_count == total:
+# #         st.markdown(
+# #             '<div class="banner banner-success">✅ All semesters approved! '
+# #             'Click below to run GPA calculation.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+# #     # ── Semester tabs ──────────────────────────────────────────────────────────
+# #     # Prefix approved sems with ✅ in the tab label
+# #     tab_labels = [
+# #         f"✅ {s}" if st.session_state.approvals.get(s, False) else s
+# #         for s in ordered
+# #     ]
+# #     tabs = st.tabs(tab_labels)
+# #     for tab, sem in zip(tabs, ordered):
+# #         with tab:
+# #             _review_tab_panel(sem)
+
+# #     # ── Bottom navigation ──────────────────────────────────────────────────────
+# #     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+# #     bc1, bc2 = st.columns([1, 4])
+# #     with bc1:
+# #         if st.button("← Back", use_container_width=True):
+# #             st.session_state.stage = "assign"
+# #             st.rerun()
+# #     with bc2:
+# #         btn_label = (
+# #             f"Proceed to GPA Calculation ({approved_count}/{total} approved) →"
+# #         )
+# #         if st.button(btn_label, type="primary",
+# #                      disabled=(approved_count < total), use_container_width=True):
+# #             st.session_state.stage = "calculate"
+# #             st.rerun()
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # REVIEW TAB HELPERS
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def _parse_semester_files(sem: str) -> None:
+# #     """
+# #     Parse every file assigned to *sem* SEPARATELY (not combined).
+# #     Stores results in:
+# #       st.session_state.sem_file_records[sem] = {fname: list[dict]}
+# #       st.session_state.sem_file_dfs[sem]     = {fname: pd.DataFrame}
+# #     """
+# #     groups     = st.session_state.semester_groups.get(sem, [])
+# #     raw        = st.session_state.raw_files
+# #     subj_hints = st.session_state.file_subjects
+
+# #     file_records: dict[str, list[dict]]    = {}
+# #     file_dfs    : dict[str, pd.DataFrame] = {}
+
+# #     for fname in groups:
+# #         fb       = raw.get(fname, b"")
+# #         sub_hint = subj_hints.get(fname)
+
+# #         if _PARSER_OK:
+# #             try:
+# #                 result = parse_file_to_records(fb, fname, subject_hint=sub_hint)
+# #             except Exception as exc:
+# #                 result = {
+# #                     "status": "ERROR", "records": [],
+# #                     "warnings": [str(exc)], "file_name": fname,
+# #                 }
+# #         else:
+# #             result = _fallback_parse(fb, fname, sub_hint)
+
+# #         if result.get("status") == "ERROR":
+# #             for w in result.get("warnings", []):
+# #                 st.error(f"**{fname}**: {w}", icon="🚫")
+# #             file_records[fname] = []
+# #             file_dfs[fname]     = pd.DataFrame(columns=EDITOR_COLS)
+# #         else:
+# #             for w in result.get("warnings", []):
+# #                 st.warning(f"**{fname}**: {w}", icon="⚠️")
+# #             recs = result.get("records", [])
+# #             file_records[fname] = recs
+# #             file_dfs[fname]     = records_to_df(recs)
+
+# #     if "sem_file_records" not in st.session_state:
+# #         st.session_state.sem_file_records = {}
+# #     if "sem_file_dfs" not in st.session_state:
+# #         st.session_state.sem_file_dfs = {}
+
+# #     st.session_state.sem_file_records[sem] = file_records
+# #     st.session_state.sem_file_dfs[sem]     = file_dfs
+
+
+# # def _show_historical_context(sn: int) -> None:
+# #     """
+# #     For Semester 2+, query the DB for existing SemesterGPA rows from
+# #     previous semesters and display them as read-only historical context.
+# #     CGPA calculation will automatically include these via recompute_cgpa().
+# #     """
+# #     if not _CALC_OK:
+# #         return
+# #     try:
+# #         engine = get_engine(st.session_state.db_url)
+# #         with Session(engine) as sess:
+# #             prev_sgpas = sess.execute(
+# #                 sa_select(SemesterGPA).where(SemesterGPA.semester < sn)
+# #             ).scalars().all()
+
+# #         if not prev_sgpas:
+# #             st.markdown(
+# #                 f'<div class="hist-banner">ℹ️ <b>Historical Data:</b> No Semester 1–{sn-1} '
+# #                 f'data found in the database yet. CGPA for this semester will only include '
+# #                 f'the records you are uploading now.</div>',
+# #                 unsafe_allow_html=True,
+# #             )
+# #             return
+
+# #         # Group by semester number
+# #         by_sem: dict[int, list] = {}
+# #         for sg in prev_sgpas:
+# #             by_sem.setdefault(sg.semester, []).append(sg)
+
+# #         st.markdown('<div class="card">', unsafe_allow_html=True)
+# #         st.markdown(
+# #             f'<div class="section-label">📚 Historical DB Data — '
+# #             f'Semesters 1–{sn-1} (read-only · auto-included in CGPA)</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         st.markdown(
+# #             '<div style="font-size:.82rem;color:#0C4A6E;margin-bottom:12px">'
+# #             'These GPA values are already stored in the database from a previous session. '
+# #             'When GPA is calculated for this semester, '
+# #             '<b>recompute_cgpa()</b> will automatically pool them to produce the '
+# #             'cumulative CGPA — no re-upload of earlier semesters needed.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+# #         hist_cols = st.columns(min(len(by_sem), 4))
+# #         for i, (prev_sn, sgpa_list) in enumerate(sorted(by_sem.items())):
+# #             valid_gpas = [sg.gpa for sg in sgpa_list if sg.gpa is not None]
+# #             avg_gpa    = sum(valid_gpas) / len(valid_gpas) if valid_gpas else None
+# #             hist_cols[i % 4].markdown(f"""<div class="kpi-box">
+# #                 <div class="kpi-value" style="font-size:1.6rem">
+# #                     {f"{avg_gpa:.2f}" if avg_gpa else "—"}
+# #                 </div>
+# #                 <div class="kpi-label">Sem {prev_sn} Avg GPA</div>
+# #                 <div style="font-size:.72rem;color:#94A3B8;margin-top:4px">
+# #                     {len(sgpa_list)} student record(s) in DB
+# #                 </div></div>""", unsafe_allow_html=True)
+
+# #         st.markdown('</div>', unsafe_allow_html=True)
+
+# #     except Exception:
+# #         # Silently skip if DB not reachable (e.g. first run)
+# #         pass
+
+
+# # def _review_tab_panel(sem: str) -> None:
+# #     """
+# #     Full review panel for one semester, shown inside its st.tab().
+
+# #     Layout:
+# #       A · Student Strength Verification  (combined distinct roll_nos across all files)
+# #       B · Historical Context             (Semester 2+ only, queries DB)
+# #       C · Per-File Validation + Editor   (one section per uploaded file — no cross-file EC-03)
+# #       D · Approve button
+# #     """
+# #     is_approved = st.session_state.approvals.get(sem, False)
+# #     sn          = sem_num(sem)
+
+# #     if is_approved:
+# #         st.markdown(
+# #             f'<div class="banner banner-success">✅ {sem} is approved and ready '
+# #             f'for GPA calculation.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         if st.button(f"🔓 Re-open {sem} for editing", key=f"reopen_{sem}"):
+# #             st.session_state.approvals[sem] = False
+# #             st.rerun()
+# #         return
+
+# #     files_for_sem = st.session_state.semester_groups.get(sem, [])
+
+# #     # ── Parse files once (per session) ────────────────────────────────────────
+# #     if sem not in st.session_state.get("sem_file_records", {}):
+# #         with st.spinner(f"Parsing {len(files_for_sem)} file(s) for {sem}…"):
+# #             _parse_semester_files(sem)
+
+# #     file_records = st.session_state.sem_file_records.get(sem, {})
+# #     file_dfs     = st.session_state.sem_file_dfs.get(sem, {})
+
+# #     # ── A · Student Strength (combined unique roll_nos across ALL subject files) ─
+# #     st.markdown('<div class="card">', unsafe_allow_html=True)
+# #     st.markdown('<div class="section-label">A · Student Strength Verification</div>',
+# #                 unsafe_allow_html=True)
+
+# #     all_rolls: set[str] = set()
+# #     for recs in file_records.values():
+# #         for r in recs:
+# #             roll = str(r.get("roll_no") or "").strip()
+# #             if roll:
+# #                 all_rolls.add(roll)
+
+# #     expected       = EXPECTED_STRENGTH.get(sem, 0)
+# #     distinct_rolls = len(all_rolls)
+# #     total_rows     = sum(len(recs) for recs in file_records.values())
+
+# #     k1, k2, k3, k4 = st.columns(4)
+# #     k1.markdown(f"""<div class="kpi-box"><div class="kpi-value">{expected}</div>
+# #         <div class="kpi-label">Expected</div></div>""", unsafe_allow_html=True)
+# #     k2.markdown(f"""<div class="kpi-box"><div class="kpi-value">{distinct_rolls}</div>
+# #         <div class="kpi-label">Distinct Students</div></div>""", unsafe_allow_html=True)
+# #     k3.markdown(f"""<div class="kpi-box"><div class="kpi-value">{len(files_for_sem)}</div>
+# #         <div class="kpi-label">Subject Files</div></div>""", unsafe_allow_html=True)
+# #     k4.markdown(f"""<div class="kpi-box"><div class="kpi-value">{total_rows}</div>
+# #         <div class="kpi-label">Total Mark Rows</div></div>""", unsafe_allow_html=True)
+
+# #     strength_locked = distinct_rolls < expected
+# #     if strength_locked:
+# #         st.markdown(
+# #             f'<div class="banner banner-critical">🚨 Expected <b>{expected}</b> students '
+# #             f'but found <b>{distinct_rolls}</b> distinct roll numbers. '
+# #             f'Add the missing <b>{expected - distinct_rolls}</b> student(s) in the '
+# #             f'file editors below before approving.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #     elif distinct_rolls == expected:
+# #         st.markdown(
+# #             '<div class="banner banner-success">✅ Student count matches expected '
+# #             'strength perfectly.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #     else:
+# #         st.markdown(
+# #             f'<div class="banner banner-warning">⚠️ {distinct_rolls - expected} extra '
+# #             f'student(s) vs expected — verify no duplicates.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #     st.markdown('</div>', unsafe_allow_html=True)
+
+# #     # ── B · Historical Context (Semester 2+) ──────────────────────────────────
+# #     if sn > 1:
+# #         _show_historical_context(sn)
+
+# #     # ── C · Per-File Validation + Editor ──────────────────────────────────────
+# #     # Each file is validated INDEPENDENTLY — same roll_no appearing in two
+# #     # different subject files does NOT trigger EC-03 (it only fires within
+# #     # the same sheet, which is the correct behaviour for multi-subject uploads).
+# #     any_blocked = False
+
+# #     for fname in files_for_sem:
+# #         recs = file_records.get(fname, [])
+# #         df   = file_dfs.get(fname, pd.DataFrame(columns=EDITOR_COLS))
+
+# #         st.markdown(
+# #             f'<div class="file-section">'
+# #             f'<div class="file-section-header">📄 {fname}</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+# #         # Live records from the current editor state
+# #         live_recs = df_to_records(df) if not df.empty else recs
+
+# #         if not live_recs:
+# #             st.warning(
+# #                 f"No valid student rows found in **{fname}**. "
+# #                 f"Check that rows 1–6 are metadata/header and that the parser "
+# #                 f"correctly detected the column header row.",
+# #                 icon="⚠️",
+# #             )
+# #             any_blocked = True
+# #         elif _VALIDATOR_OK:
+# #             try:
+# #                 report = validate_records(live_recs, semester=sem)
+# #                 if report.status == "BLOCKED":
+# #                     any_blocked = True
+# #                 _render_validation(report)
+# #             except Exception as exc:
+# #                 st.error(f"Validation engine error for {fname}: {exc}", icon="🚫")
+# #                 any_blocked = True
+# #         else:
+# #             st.error(
+# #                 "validation_agent could not be imported — fix the module error in the sidebar.",
+# #                 icon="🚫",
+# #             )
+# #             any_blocked = True
+
+# #         # Data editor for this specific file
+# #         if not df.empty:
+# #             key = f"editor_{_safe_key(sem)}_{_safe_key(fname)}"
+# #             edited_df = st.data_editor(
+# #                 df,
+# #                 key                = key,
+# #                 use_container_width= True,
+# #                 num_rows           = "dynamic",
+# #                 hide_index         = True,
+# #                 column_config={
+# #                     "student_name"  : st.column_config.TextColumn("Student Name", width="medium"),
+# #                     "roll_no"       : st.column_config.TextColumn("Roll No",      width="medium"),
+# #                     "father_name"   : st.column_config.TextColumn("Father Name",  width="medium"),
+# #                     "subject_name"  : st.column_config.TextColumn("Subject",      width="medium"),
+# #                     "total_marks"   : st.column_config.NumberColumn("Total",   min_value=0, format="%.1f", width="small"),
+# #                     "obtained_marks": st.column_config.NumberColumn("Obtained",min_value=0, format="%.1f", width="small"),
+# #                     "credit_hours"  : st.column_config.NumberColumn("Cr. Hrs", min_value=0, step=1, format="%d", width="small"),
+# #                     "department"    : st.column_config.TextColumn("Dept",         width="small"),
+# #                 },
+# #             )
+# #             # Persist edits back so approve reads updated data
+# #             st.session_state.sem_file_dfs[sem][fname] = edited_df
+# #         else:
+# #             st.info("Editor unavailable — file produced no parseable records.", icon="ℹ️")
+
+# #         st.markdown('</div>', unsafe_allow_html=True)
+
+# #     # ── D · Approve Button ─────────────────────────────────────────────────────
+# #     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+# #     can_approve = not any_blocked and not strength_locked
+
+# #     b1, b2 = st.columns([3, 1])
+# #     with b1:
+# #         if not can_approve:
+# #             reasons = []
+# #             if any_blocked:    reasons.append("resolve all 🔴 BLOCKED errors")
+# #             if strength_locked: reasons.append(f"add {expected - distinct_rolls} missing student(s)")
+# #             st.markdown(
+# #                 f'<div class="banner banner-info" style="margin:0">🔒 '
+# #                 f'To unlock approval: <b>{"  &amp;  ".join(reasons)}</b></div>',
+# #                 unsafe_allow_html=True,
+# #             )
+# #         else:
+# #             st.markdown(
+# #                 '<div class="banner banner-success" style="margin:0">'
+# #                 '🔓 No blockers — ready to approve.</div>',
+# #                 unsafe_allow_html=True,
+# #             )
+# #     with b2:
+# #         if st.button(
+# #             f"✅ Approve {sem}",
+# #             type             = "primary",
+# #             disabled         = not can_approve,
+# #             use_container_width= True,
+# #             key              = f"approve_{sem}",
+# #         ):
+# #             _approve_semester(sem)
+
+
+# # def _approve_semester(sem: str) -> None:
+# #     """
+# #     Combine all per-file edited records for *sem* into sem_records[sem]
+# #     (used by the calculator), then mark the semester as approved.
+# #     """
+# #     file_dfs = st.session_state.sem_file_dfs.get(sem, {})
+# #     combined: list[dict] = []
+# #     for df in file_dfs.values():
+# #         combined.extend(df_to_records(df))
+# #     st.session_state.sem_records[sem] = combined
+# #     st.session_state.approvals[sem]   = True
+# #     st.rerun()
+
+
+# # def _render_validation(report: Any) -> None:
+# #     status_map = {
+# #         "CLEAN"  : ("banner-success", "✅ All records are clean."),
+# #         "FLAGGED": ("banner-warning", "⚠️ Some records need review."),
+# #         "BLOCKED": ("banner-critical","🚫 Critical issues must be fixed before approval."),
+# #     }
+# #     cls, msg = status_map.get(report.status, ("banner-info", ""))
+# #     st.markdown(f"""
+# #     <div class="banner {cls}">
+# #         <div style="flex:1">{msg}</div>
+# #         <div style="display:flex;gap:12px;font-size:.8rem">
+# #             <span class="badge badge-clean">✓ {report.summary.clean} clean</span>
+# #             <span class="badge badge-flagged">⚠ {report.summary.flagged} flagged</span>
+# #             <span class="badge badge-blocked">✗ {report.summary.blocked} blocked</span>
+# #         </div>
+# #     </div>""", unsafe_allow_html=True)
+
+# #     if not report.flagged_rows:
+# #         return
+
+# #     blocked = [r for r in report.flagged_rows if r.severity == "BLOCKED"]
+# #     flagged = [r for r in report.flagged_rows if r.severity == "FLAGGED"]
+# #     info    = [r for r in report.flagged_rows if r.severity == "INFO"]
+
+# #     if blocked:
+# #         with st.expander(f"🔴 BLOCKED Issues — {len(blocked)} (must fix)", expanded=True):
+# #             for r in blocked:
+# #                 st.error(
+# #                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+# #                     f"**{r.error_code}**: {r.error_message}", icon="🚫")
+# #     if flagged:
+# #         with st.expander(f"🟡 FLAGGED Warnings — {len(flagged)} (review recommended)"):
+# #             for r in flagged:
+# #                 st.warning(
+# #                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+# #                     f"**{r.error_code}**: {r.error_message}", icon="⚠️")
+# #     if info:
+# #         with st.expander(f"🔵 INFO Notes — {len(info)} (non-credit subjects)"):
+# #             for r in info:
+# #                 st.info(
+# #                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+# #                     f"**{r.error_code}**: {r.error_message}", icon="ℹ️")
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STAGE 3 — CALCULATE  (sequential: Semester 1 → 2 → … so CGPA history builds)
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_calculate() -> None:
+# #     st.markdown('<div class="stage-title">⚙️ Running GPA Calculation Engine</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         '<div class="stage-subtitle">'
+# #         'Processing approved semesters <b>in order</b> (Semester 1 first). '
+# #         'Each semester\'s SemesterGPA is saved to the DB before the next semester '
+# #         'is processed — so CGPA at each step automatically includes all historical '
+# #         'data (including records from previous upload sessions).</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     approved = sorted(
+# #         [s for s in st.session_state.ordered_sems if st.session_state.approvals.get(s)],
+# #         key=sem_num,
+# #     )
+
+# #     if not approved:
+# #         st.error("No approved semesters. Return to review.", icon="🚫")
+# #         if st.button("← Back to Review"):
+# #             st.session_state.stage = "review"
+# #             st.rerun()
+# #         return
+
+# #     total_recs = sum(len(st.session_state.sem_records.get(s, [])) for s in approved)
+# #     c1, c2, c3 = st.columns(3)
+# #     c1.metric("Approved Semesters", len(approved))
+# #     c2.metric("Total Records",      total_recs)
+# #     c3.metric("Processing Order",   " → ".join(f"Sem {sem_num(s)}" for s in approved))
+
+# #     if not _CALC_OK:
+# #         st.error("calculator_agent could not be imported. Fix import errors in sidebar.", icon="🚫")
+# #         return
+
+# #     # ── Sequential per-semester calculation ────────────────────────────────────
+# #     agg: dict[str, Any] = {
+# #         "marks_written": 0, "semester_gpas": [], "cgpas": [], "errors": [],
+# #     }
+
+# #     progress_bar = st.progress(0, text="Starting…")
+# #     status_area  = st.empty()
+
+# #     for step_i, sem in enumerate(approved):
+# #         sn = sem_num(sem)
+# #         ay = infer_academic_year(sn)
+
+# #         status_area.markdown(
+# #             f'<div class="banner banner-info">⚙️ Processing <b>{sem}</b> '
+# #             f'(academic year {ay})…</div>',
+# #             unsafe_allow_html=True,
+# #         )
+
+# #         sem_recs: list[dict] = []
+# #         for rec in st.session_state.sem_records.get(sem, []):
+# #             e = dict(rec)
+# #             e["semester"]      = sn
+# #             e["academic_year"] = ay
+# #             sem_recs.append(e)
+
+# #         if not sem_recs:
+# #             st.warning(f"No records found for {sem} — skipping.", icon="⚠️")
+# #             progress_bar.progress((step_i + 1) / len(approved))
+# #             continue
+
+# #         try:
+# #             out = calculator_agent_node({
+# #                 "validated_records": sem_recs,
+# #                 "semester"         : sn,
+# #                 "academic_year"    : ay,
+# #                 "db_url"           : st.session_state.db_url,
+# #                 "approved_by"      : "HOD",
+# #                 "source_file"      : "dashboard_upload",
+# #                 "errors"           : [],
+# #             })
+# #             agg["marks_written"] += out.get("marks_written", 0)
+# #             agg["semester_gpas"].extend(out.get("semester_gpas", []))
+# #             # Keep only the latest CGPA entry per student (last write wins)
+# #             for new_cgpa in out.get("cgpas", []):
+# #                 agg["cgpas"] = [
+# #                     c for c in agg["cgpas"]
+# #                     if c["student_id"] != new_cgpa["student_id"]
+# #                 ]
+# #                 agg["cgpas"].append(new_cgpa)
+# #             agg["errors"].extend(out.get("errors", []))
+# #         except Exception as exc:
+# #             st.error(f"Error calculating {sem}: {exc}", icon="🚫")
+# #             agg["errors"].append({"roll_no": None, "reason": f"{sem}: {exc}"})
+
+# #         progress_bar.progress((step_i + 1) / len(approved))
+
+# #     status_area.markdown(
+# #         '<div class="banner banner-success">✅ All semesters processed successfully.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     st.session_state.calc_results = agg
+# #     st.session_state.stage        = "results"
+# #     st.rerun()
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # STAGE 4 — RESULTS
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def render_results() -> None:
+# #     st.markdown('<div class="stage-title">📊 GPA Results & Final Approval</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         '<div class="stage-subtitle">Review the per-subject GPA breakdown and the '
+# #         'progressive CGPA table before committing to the database.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     res           = st.session_state.calc_results or {}
+# #     marks_written = res.get("marks_written", 0)
+# #     sem_gpas      = res.get("semester_gpas", [])
+# #     cgpas         = res.get("cgpas", [])
+# #     errors        = res.get("errors", [])
+
+# #     # ── Top metrics ────────────────────────────────────────────────────────────
+# #     m1, m2, m3, m4 = st.columns(4)
+# #     m1.metric("Records Written", marks_written)
+# #     m2.metric("Semester GPAs",   len(sem_gpas))
+# #     m3.metric("Students (CGPA)", len(cgpas))
+# #     m4.metric("Errors",          len(errors),
+# #               delta=f"{len(errors)} errors" if errors else None,
+# #               delta_color="inverse" if errors else "off")
+
+# #     if errors:
+# #         with st.expander(f"⚠️ Calculation Errors ({len(errors)})", expanded=True):
+# #             for e in errors:
+# #                 st.error(f"`{e.get('roll_no','N/A')}` — {e.get('reason','unknown')}", icon="🚫")
+
+# #     # ── Per-Subject GPA Breakdown ──────────────────────────────────────────────
+# #     st.markdown('<div class="card">', unsafe_allow_html=True)
+# #     st.markdown('<div class="section-label">Per-Subject GPA Breakdown</div>',
+# #                 unsafe_allow_html=True)
+
+# #     subj_df = _build_subject_gpa_df()
+# #     if not subj_df.empty:
+# #         st.dataframe(
+# #             subj_df,
+# #             use_container_width=True,
+# #             hide_index=True,
+# #             column_config={
+# #                 "GPA": st.column_config.NumberColumn("Grade Point", format="%.2f"),
+# #                 "%":   st.column_config.NumberColumn("Percentage",  format="%.1f%%"),
+# #             },
+# #         )
+# #         buf_subj = io.StringIO()
+# #         subj_df.to_csv(buf_subj, index=False)
+# #         st.download_button(
+# #             "⬇ Download Per-Subject Report (CSV)",
+# #             data=buf_subj.getvalue(),
+# #             file_name=f"subject_gpa_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+# #             mime="text/csv",
+# #         )
+# #     else:
+# #         st.info("No subject-level data found in the database for the processed semesters.", icon="ℹ️")
+
+# #     st.markdown('</div>', unsafe_allow_html=True)
+
+# #     # ── Progressive GPA Table ──────────────────────────────────────────────────
+# #     st.markdown('<div class="card">', unsafe_allow_html=True)
+# #     st.markdown('<div class="section-label">Progressive Semester GPA & Cumulative CGPA</div>',
+# #                 unsafe_allow_html=True)
+# #     st.markdown(
+# #         '<div style="font-size:.8rem;color:#64748B;margin-bottom:14px">'
+# #         'CGPA = Σ Quality Points ÷ Σ Credit Hours (HEC Pakistan standard — '
+# #         'never an average of GPA values). Includes all historical semesters from DB.</div>',
+# #         unsafe_allow_html=True,
+# #     )
+
+# #     approved_sems = [s for s in st.session_state.ordered_sems
+# #                      if st.session_state.approvals.get(s)]
+# #     prog_html = _build_progressive_html(approved_sems)
+# #     st.markdown(prog_html, unsafe_allow_html=True)
+
+# #     prog_df = _build_progressive_df_for_export(approved_sems)
+# #     if not prog_df.empty:
+# #         buf = io.StringIO()
+# #         prog_df.to_csv(buf, index=False)
+# #         st.download_button(
+# #             "⬇ Download Progressive GPA Report (CSV)",
+# #             data      = buf.getvalue(),
+# #             file_name = f"gpa_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+# #             mime      = "text/csv",
+# #         )
+# #     st.markdown('</div>', unsafe_allow_html=True)
+
+# #     # ── Final Decision ─────────────────────────────────────────────────────────
+# #     st.markdown('<div class="card">', unsafe_allow_html=True)
+# #     st.markdown('<div class="section-label">Final Decision</div>', unsafe_allow_html=True)
+
+# #     if st.session_state.final_saved:
+# #         st.markdown(
+# #             '<div class="banner banner-success">💾 Results approved and permanently '
+# #             'saved to the database. HOD sign-off recorded.</div>',
+# #             unsafe_allow_html=True,
+# #         )
+# #         if st.button("🔄 Start New Batch", use_container_width=True):
+# #             _reset()
+# #             st.rerun()
+# #         st.markdown('</div>', unsafe_allow_html=True)
+# #         return
+
+# #     col_save, col_reject = st.columns(2)
+# #     with col_save:
+# #         if st.button("💾 Approve & Save Permanently to Database",
+# #                      type="primary", use_container_width=True):
+# #             st.session_state.final_saved = True
+# #             st.success("✅ HOD approval recorded. Results saved.", icon="✅")
+# #             st.rerun()
+# #     with col_reject:
+# #         if st.button("🛑 Report Error / Reject Results",
+# #                      type="secondary", use_container_width=True):
+# #             st.session_state.calc_results = None
+# #             st.session_state.approvals    = {}
+# #             st.session_state.stage        = "review"
+# #             st.warning("Results rejected. Re-review all semesters.", icon="⚠️")
+# #             st.rerun()
+# #     st.markdown('</div>', unsafe_allow_html=True)
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # RESULT BUILDERS
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def _build_subject_gpa_df() -> pd.DataFrame:
+# #     """
+# #     Query DB for per-student per-subject marks and return a tidy DataFrame.
+# #     Columns: Roll No | Student Name | Semester | Subject | Cr.Hrs |
+# #              Obtained | Total | % | Grade Point | Quality Pts
+# #     """
+# #     if not _CALC_OK:
+# #         return pd.DataFrame()
+# #     try:
+# #         engine = get_engine(st.session_state.db_url)
+# #         with Session(engine) as sess:
+# #             marks_list   = sess.execute(sa_select(Mark)).scalars().all()
+# #             students_map = {s.id: s for s in sess.execute(sa_select(Student)).scalars().all()}
+# #             subjects_map = {s.id: s for s in sess.execute(sa_select(Subject)).scalars().all()}
+
+# #         rows = []
+# #         for m in marks_list:
+# #             stu = students_map.get(m.student_id)
+# #             sub = subjects_map.get(m.subject_id)
+# #             if not stu or not sub:
+# #                 continue
+# #             rows.append({
+# #                 "Roll No"     : stu.roll_no,
+# #                 "Student Name": stu.student_name,
+# #                 "Semester"    : m.semester,
+# #                 "Subject"     : sub.subject_name,
+# #                 "Cr. Hrs"     : sub.credit_hours,
+# #                 "Obtained"    : m.obtained_marks,
+# #                 "Total"       : m.total_marks,
+# #                 "%"           : round(m.percentage, 1),
+# #                 "GPA"         : m.grade_point,
+# #                 "Quality Pts" : m.quality_points,
+# #             })
+
+# #         if not rows:
+# #             return pd.DataFrame()
+
+# #         df = pd.DataFrame(rows)
+# #         df.sort_values(["Semester", "Roll No", "Subject"], inplace=True)
+# #         df.reset_index(drop=True, inplace=True)
+# #         return df
+
+# #     except Exception:
+# #         return pd.DataFrame()
+
+
+# # def _build_progressive_html(approved_sems: list[str]) -> str:
+# #     """Build HTML progressive GPA table from the DB (fallback: in-memory)."""
+
+# #     def _gpa_cell(val: float | None) -> str:
+# #         if val is None:
+# #             return '<td class="gpa-dash">—</td>'
+# #         cls = ("gpa-high" if val >= 3.50 else "gpa-mid" if val >= 2.50 else "gpa-low")
+# #         return f'<td class="{cls}">{val:.2f}</td>'
+
+# #     # Include ALL semesters in DB, not just the ones uploaded this session
+# #     rows_data: list[dict] = []
+# #     try:
+# #         if _CALC_OK:
+# #             engine = get_engine(st.session_state.db_url)
+# #             with Session(engine) as sess:
+# #                 students  = sess.execute(sa_select(Student)).scalars().all()
+# #                 all_sgpas = sess.execute(sa_select(SemesterGPA)).scalars().all()
+# #                 all_cgpas = sess.execute(sa_select(CGPA)).scalars().all()
+
+# #             sgpa_map: dict[int, dict[int, Any]] = {}
+# #             for sg in all_sgpas:
+# #                 sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
+# #             cgpa_map = {c.student_id: c for c in all_cgpas}
+
+# #             # Use ALL semesters present in DB for columns
+# #             all_sem_nums = sorted({sg.semester for sg in all_sgpas})
+# #             if not all_sem_nums:
+# #                 all_sem_nums = sorted(sem_num(s) for s in approved_sems)
+
+# #             for stu in students:
+# #                 row: dict = {"name": stu.student_name, "roll": stu.roll_no,
+# #                              "dept": stu.department or ""}
+# #                 running_qp = running_ch = 0.0
+# #                 for sn in all_sem_nums:
+# #                     sg = sgpa_map.get(stu.id, {}).get(sn)
+# #                     row[f"gpa_{sn}"] = sg.gpa if sg else None
+# #                     if sg:
+# #                         running_ch += sg.total_credit_hours or 0
+# #                         running_qp += sg.total_quality_points or 0
+# #                     row[f"cgpa_{sn}"] = (round(running_qp / running_ch, 2)
+# #                                          if running_ch > 0 else None)
+# #                 final = cgpa_map.get(stu.id)
+# #                 row["final_cgpa"] = final.cgpa if final else None
+# #                 row["_sem_nums"]  = all_sem_nums
+# #                 rows_data.append(row)
+# #     except Exception:
+# #         all_sem_nums = sorted(sem_num(s) for s in approved_sems)
+# #         res = st.session_state.calc_results or {}
+# #         sgpa_mem: dict[int, dict[int, dict]] = {}
+# #         for sg in res.get("semester_gpas", []):
+# #             sgpa_mem.setdefault(sg["student_id"], {})[sg["semester"]] = sg
+# #         cgpa_mem = {c["student_id"]: c for c in res.get("cgpas", [])}
+# #         for sid in sorted(sgpa_mem):
+# #             row = {"name": f"Student {sid}", "roll": "—", "dept": ""}
+# #             rqp = rch = 0.0
+# #             for sn in all_sem_nums:
+# #                 sg  = sgpa_mem.get(sid, {}).get(sn, {})
+# #                 gpa = sg.get("gpa")
+# #                 row[f"gpa_{sn}"]  = gpa
+# #                 rch += sg.get("total_credit_hours", 0) or 0
+# #                 rqp += sg.get("total_quality_points", 0) or 0
+# #                 row[f"cgpa_{sn}"] = round(rqp / rch, 2) if rch > 0 else None
+# #             fc = cgpa_mem.get(sid, {})
+# #             row["final_cgpa"] = fc.get("cgpa")
+# #             row["_sem_nums"]  = all_sem_nums
+# #             rows_data.append(row)
+
+# #     if not rows_data:
+# #         return '<div class="banner banner-warning">No student data found in the database.</div>'
+
+# #     sem_nums = rows_data[0].get("_sem_nums", [])
+
+# #     th = "<tr><th>Student Name</th><th>Roll No</th><th>Dept</th>"
+# #     for sn in sem_nums:
+# #         th += f"<th>Sem {sn} GPA</th><th>CGPA (1–{sn})</th>"
+# #     th += "<th>Final CGPA</th></tr>"
+
+# #     body = ""
+# #     for r in rows_data:
+# #         body += (f'<tr><td class="name-col">{r["name"]}</td>'
+# #                  f'<td class="roll-col">{r["roll"]}</td>'
+# #                  f'<td class="roll-col">{r["dept"]}</td>')
+# #         for sn in sem_nums:
+# #             body += _gpa_cell(r.get(f"gpa_{sn}"))
+# #             body += _gpa_cell(r.get(f"cgpa_{sn}"))
+# #         body += _gpa_cell(r.get("final_cgpa"))
+# #         body += "</tr>"
+
+# #     return (
+# #         f'<div style="overflow-x:auto">'
+# #         f'<table class="gpa-table"><thead>{th}</thead><tbody>{body}</tbody></table>'
+# #         f'</div>'
+# #         f'<div style="margin-top:10px;font-size:.75rem;color:#94A3B8">'
+# #         f'🟢 ≥ 3.50 Excellent &nbsp;|&nbsp; '
+# #         f'🟡 2.50 – 3.49 Good &nbsp;|&nbsp; '
+# #         f'🔴 &lt; 2.50 At Risk</div>'
+# #     )
+
+
+# # def _build_progressive_df_for_export(approved_sems: list[str]) -> pd.DataFrame:
+# #     if not _CALC_OK:
+# #         return pd.DataFrame()
+# #     try:
+# #         engine = get_engine(st.session_state.db_url)
+# #         with Session(engine) as sess:
+# #             students  = sess.execute(sa_select(Student)).scalars().all()
+# #             all_sgpas = sess.execute(sa_select(SemesterGPA)).scalars().all()
+# #             all_cgpas = sess.execute(sa_select(CGPA)).scalars().all()
+
+# #         sgpa_map: dict[int, dict[int, Any]] = {}
+# #         for sg in all_sgpas:
+# #             sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
+# #         cgpa_map = {c.student_id: c for c in all_cgpas}
+
+# #         all_sem_nums = sorted({sg.semester for sg in all_sgpas}
+# #                               or {sem_num(s) for s in approved_sems})
+
+# #         rows = []
+# #         for stu in students:
+# #             row = {"Student Name": stu.student_name, "Roll No": stu.roll_no,
+# #                    "Department": stu.department or ""}
+# #             rqp = rch = 0.0
+# #             for sn in all_sem_nums:
+# #                 sg = sgpa_map.get(stu.id, {}).get(sn)
+# #                 row[f"Sem {sn} GPA"] = f"{sg.gpa:.2f}" if (sg and sg.gpa) else "—"
+# #                 if sg:
+# #                     rch += sg.total_credit_hours or 0
+# #                     rqp += sg.total_quality_points or 0
+# #                 row[f"CGPA (1–{sn})"] = f"{rqp/rch:.2f}" if rch > 0 else "—"
+# #             fc = cgpa_map.get(stu.id)
+# #             row["Final CGPA"] = f"{fc.cgpa:.2f}" if (fc and fc.cgpa) else "—"
+# #             rows.append(row)
+
+# #         return pd.DataFrame(rows) if rows else pd.DataFrame()
+# #     except Exception:
+# #         return pd.DataFrame()
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # FALLBACK PARSER  (when parser_agent cannot be imported)
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # _FALIAS: dict[str, list[str]] = {
+# #     "student_name"  : ["student name","name","student","sname"],
+# #     "roll_no"       : ["roll no","roll number","rollno","reg no","registration no"],
+# #     "father_name"   : ["father name","father's name","fname"],
+# #     "subject_name"  : ["subject name","subject","course name","course"],
+# #     "total_marks"   : ["total marks","total","max marks","maximum marks","full marks"],
+# #     "obtained_marks": ["obtained marks","obtained","marks","marks obtained","scored"],
+# #     "credit_hours"  : ["credit hours","credits","ch","credit_hours"],
+# #     "department"    : ["department","dept","program"],
+# # }
+# # _FOOTER_KWS_FB = frozenset({
+# #     "signature","teacher","head","principal","controller",
+# #     "examiner","lecturer","dean","chairman","coordinator",
+# #     "prepared by","checked by","approved by","seal",
+# # })
+
+
+# # def _fallback_parse(file_bytes: bytes, filename: str,
+# #                     subject_hint: str | None) -> dict[str, Any]:
+# #     import io as _io
+# #     ext = Path(filename).suffix.lower()
+# #     buf = _io.BytesIO(file_bytes)
+# #     try:
+# #         df_raw = (pd.read_csv(buf, header=None, dtype=str)
+# #                   if ext == ".csv"
+# #                   else pd.read_excel(buf, header=None, dtype=str, engine="openpyxl"))
+# #     except Exception as exc:
+# #         return {"file_name": filename, "status": "ERROR", "records": [], "warnings": [str(exc)]}
+
+# #     alias_words = {w for a_list in _FALIAS.values() for a in a_list for w in a.split()}
+# #     best, score = 0, -1
+# #     for i in range(min(25, len(df_raw))):
+# #         words = {w for v in df_raw.iloc[i].values if pd.notna(v)
+# #                  for w in str(v).strip().lower().split()}
+# #         s = len(words & alias_words)
+# #         if s > score:
+# #             score, best = s, i
+# #     if score < 2:
+# #         best = 0
+
+# #     buf = _io.BytesIO(file_bytes)
+# #     try:
+# #         df = (pd.read_csv(buf, header=best, dtype=str)
+# #               if ext == ".csv"
+# #               else pd.read_excel(buf, header=best, dtype=str, engine="openpyxl"))
+# #     except Exception:
+# #         return {"file_name": filename, "status": "ERROR", "records": [], "warnings": []}
+
+# #     df.dropna(how="all", inplace=True)
+# #     # Footer trim (fallback version)
+# #     end_idx = len(df)
+# #     for i in range(len(df) - 1, -1, -1):
+# #         row = df.iloc[i]
+# #         nn = [str(v).strip() for v in row.values
+# #               if pd.notna(v) and str(v).strip().lower() not in ("","nan","none")]
+# #         if not nn:
+# #             end_idx = i; continue
+# #         if any(kw in " ".join(v.lower() for v in nn) for kw in _FOOTER_KWS_FB):
+# #             end_idx = i; continue
+# #         break
+# #     df = df.iloc[:end_idx].reset_index(drop=True)
+
+# #     n2raw = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
+# #     cm: dict[str, str] = {}
+# #     for field, aliases in _FALIAS.items():
+# #         for a in aliases:
+# #             if a in n2raw:
+# #                 cm[field] = n2raw[a]; break
+
+# #     records: list[dict] = []
+# #     for _, row in df.iterrows():
+# #         rec: dict = {"has_issues": False, "parse_warnings": [],
+# #                      "subject_name": subject_hint}
+# #         all_null = True
+# #         for field, col in cm.items():
+# #             raw = row.get(col)
+# #             if pd.isna(raw) or str(raw).strip() in ("", "nan"):
+# #                 continue
+# #             all_null = False
+# #             val = str(raw).strip()
+# #             if field in ("total_marks","obtained_marks"):
+# #                 try:    rec[field] = float(val)
+# #                 except: rec[field] = val; rec["has_issues"] = True
+# #             elif field == "credit_hours":
+# #                 try:    rec[field] = int(float(val))
+# #                 except: rec[field] = val; rec["has_issues"] = True
+# #             else:
+# #                 rec[field] = val
+# #         if not all_null:
+# #             records.append(rec)
+# #     return {"file_name": filename,
+# #             "status": "OK" if records else "ERROR",
+# #             "records": records, "warnings": []}
+
+
+# # def _fallback_detect(filename: str) -> tuple[str | None, str | None]:
+# #     """Fallback when parser_agent is not importable."""
+# #     m = _STRICT_FILE_RE.match(filename)
+# #     if m:
+# #         n   = int(m.group(1))
+# #         raw = m.group(2)
+# #         sub = re.sub(r"[-_]+", " ", raw).strip().title()
+# #         return f"Semester {n}", sub
+# #     return None, None
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # RESET
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def _reset() -> None:
+# #     for k in [
+# #         "stage", "raw_files", "file_assignments", "file_subjects",
+# #         "semester_groups", "sem_file_records", "sem_file_dfs",
+# #         "sem_records", "approvals", "val_reports",
+# #         "ordered_sems", "calc_results", "final_saved", "invalid_files",
+# #     ]:
+# #         st.session_state.pop(k, None)
+
+
+# # # ──────────────────────────────────────────────────────────────────────────────
+# # # MAIN
+# # # ──────────────────────────────────────────────────────────────────────────────
+
+# # def main() -> None:
+# #     _init()
+# #     render_sidebar()
+
+# #     stage = st.session_state.stage
+# #     if   stage == "upload"    : render_upload()
+# #     elif stage == "assign"    : render_assign()
+# #     elif stage == "review"    : render_review()
+# #     elif stage == "calculate" : render_calculate()
+# #     elif stage == "results"   : render_results()
+# #     else:
+# #         st.error(f"Unknown stage '{stage}'.")
+# #         if st.button("🔄 Reset"):
+# #             _reset()
+# #             st.rerun()
+
+
+# # if __name__ == "__main__":
+# #     main()
+# """
+# src/dashboard/app.py
+# ====================
+# University of Loralai — CS Department
+# Enterprise HITL GPA Calculation Dashboard  |  Tech Lead: Arif Khan
+
+# File-name-independent: any .xlsx / .csv filename is accepted.
+# Semester and subject are auto-detected from the first 15 rows of file
+# content (university metadata header rows).  Three formats are handled:
+#   A) Colon-in-cell  : "Semester: 3"  /  "Subject: Operating Systems"
+#   B) Two-cell pair  : | Semester | 3 |  /  | Subject | OS |
+#   C) Free-text cell : "3rd Semester — Data Structures"
+# If auto-detection fails the user assigns semester manually via dropdown
+# on the Review Assignments step (every file MUST have a semester before
+# the pipeline can proceed).
+
+# Per-file validation prevents false duplicate-roll-no alerts when multiple
+# subject files belong to the same semester.
+
+# Semester tabs give simultaneous access to all semesters under review.
+
+# Historical CGPA: when processing Semester 2 (or later), the calculator
+# automatically reads historical SemesterGPA rows already in the DB — no
+# need to re-upload previous semester data.
+
+# Run from project root:
+#     streamlit run src/dashboard/app.py
+# """
+
+# from __future__ import annotations
+
+# import io
+# import os
+# import re
+# import sys
+# from datetime import datetime
+# from pathlib import Path
+# from typing import Any
+
+# import pandas as pd
+# import streamlit as st
+# from dotenv import load_dotenv
+
+# load_dotenv()
+
+# # ─── Path: ensure project root is resolvable ──────────────────────────────────
+# _ROOT = Path(__file__).resolve().parent.parent.parent
+# if str(_ROOT) not in sys.path:
+#     sys.path.insert(0, str(_ROOT))
+
+# # ─── Agent imports (fail-safe: UI still boots even if one module is broken) ───
+# _ERRORS: list[str] = []
+
+# try:
+#     from src.agents.parser_agent import (
+#         detect_semester_and_subject,
+#         parse_file_to_records,
+#         _prettify_subject,          # reused for subject name formatting
+#     )
+#     _PARSER_OK = True
+# except Exception as _e:
+#     _PARSER_OK = False
+#     _ERRORS.append(f"parser_agent → {_e}")
+
+# try:
+#     from src.agents.validation_agent import validate_records
+#     _VALIDATOR_OK = True
+# except Exception as _e:
+#     _VALIDATOR_OK = False
+#     _ERRORS.append(f"validation_agent → {_e}")
+
+# try:
+#     from src.agents.calculator_agent import calculator_agent_node, get_engine
+#     from src.models.database_models import Student, Subject, Mark, SemesterGPA, CGPA
+#     from sqlalchemy.orm import Session
+#     from sqlalchemy import select as sa_select
+#     _CALC_OK = True
+# except Exception as _e:
+#     _CALC_OK = False
+#     _ERRORS.append(f"calculator_agent / database_models → {_e}")
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # PAGE CONFIG  (must be the first Streamlit call)
+# # ──────────────────────────────────────────────────────────────────────────────
+# st.set_page_config(
+#     page_title   = "GPA Dashboard — University of Loralai",
+#     page_icon    = "🎓",
+#     layout       = "wide",
+#     initial_sidebar_state = "expanded",
+# )
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # ENTERPRISE DESIGN SYSTEM
+# # ──────────────────────────────────────────────────────────────────────────────
+# st.markdown("""
+# <style>
+# html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
+# .stApp { background-color: #EEF2F7; }
+# section[data-testid="stSidebar"] {
+#     background: linear-gradient(180deg, #0B1E3D 0%, #122B52 60%, #0F2444 100%);
+#     border-right: 1px solid #1E3A6E;
+# }
+# section[data-testid="stSidebar"] * { color: #CBD5E1 !important; }
+# section[data-testid="stSidebar"] .sidebar-title { color:#F1F5F9!important;font-size:1.05rem;font-weight:700; }
+# section[data-testid="stSidebar"] hr { border-color: #1E3A6E !important; }
+# .card { background:#FFFFFF;border-radius:12px;padding:24px 28px;
+#         box-shadow:0 1px 4px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.04);
+#         border:1px solid #E2E8F0;margin-bottom:18px; }
+# .card-sm { background:#FFFFFF;border-radius:10px;padding:16px 20px;
+#            box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid #E2E8F0;margin-bottom:12px; }
+# .stage-title  { font-size:1.55rem;font-weight:800;color:#0F2444;letter-spacing:-.5px;margin-bottom:4px; }
+# .stage-subtitle { font-size:.9rem;color:#64748B;margin-bottom:24px;font-weight:400; }
+# .section-label { font-size:.7rem;font-weight:700;letter-spacing:1.2px;
+#                  text-transform:uppercase;color:#94A3B8;margin-bottom:8px; }
+# .banner { border-radius:8px;padding:12px 18px;font-weight:600;font-size:.9rem;
+#           margin:10px 0;display:flex;align-items:center;gap:10px;line-height:1.5; }
+# .banner-critical { background:linear-gradient(135deg,#FEF2F2,#FEE2E2);border:1px solid #FECACA;
+#                    border-left:4px solid #DC2626;color:#7F1D1D; }
+# .banner-warning  { background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border:1px solid #FDE68A;
+#                    border-left:4px solid #D97706;color:#78350F; }
+# .banner-success  { background:linear-gradient(135deg,#F0FDF4,#DCFCE7);border:1px solid #BBF7D0;
+#                    border-left:4px solid #16A34A;color:#14532D; }
+# .banner-info     { background:linear-gradient(135deg,#EFF6FF,#DBEAFE);border:1px solid #BFDBFE;
+#                    border-left:4px solid #2563EB;color:#1E3A8A; }
+# .badge { display:inline-block;border-radius:20px;padding:2px 10px;
+#          font-size:.72rem;font-weight:700;letter-spacing:.3px;vertical-align:middle; }
+# .badge-blocked { background:#FEE2E2;color:#B91C1C;border:1px solid #FECACA; }
+# .badge-flagged { background:#FEF3C7;color:#B45309;border:1px solid #FDE68A; }
+# .badge-clean   { background:#DCFCE7;color:#15803D;border:1px solid #BBF7D0; }
+# .badge-info    { background:#DBEAFE;color:#1D4ED8;border:1px solid #BFDBFE; }
+# .kpi-box { background:#FFFFFF;border-radius:12px;padding:20px 24px;text-align:center;
+#            box-shadow:0 1px 4px rgba(0,0,0,.06);border:1px solid #E2E8F0; }
+# .kpi-value { font-size:2.2rem;font-weight:800;color:#0F2444;line-height:1.1; }
+# .kpi-label { font-size:.78rem;font-weight:600;color:#64748B;
+#              text-transform:uppercase;letter-spacing:.8px;margin-top:6px; }
+# .file-chip { display:inline-flex;align-items:center;gap:6px;background:#F8FAFC;
+#              border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;
+#              font-size:.8rem;color:#374151;margin:3px; }
+# .gpa-table { width:100%;border-collapse:collapse;font-size:.85rem; }
+# .gpa-table th { background:#0F2444;color:#F1F5F9;padding:10px 14px;text-align:center;
+#                 font-weight:600;font-size:.75rem;letter-spacing:.5px;white-space:nowrap; }
+# .gpa-table td { padding:9px 14px;text-align:center;border-bottom:1px solid #F1F5F9;color:#374151; }
+# .gpa-table tr:hover td { background:#F8FAFC; }
+# .gpa-table td.name-col { text-align:left;font-weight:600;color:#0F2444; }
+# .gpa-table td.roll-col { text-align:left;color:#64748B;font-size:.8rem; }
+# .gpa-high { background:#DCFCE7!important;color:#166534;font-weight:700;border-radius:6px; }
+# .gpa-mid  { background:#FEF3C7!important;color:#92400E;font-weight:600;border-radius:6px; }
+# .gpa-low  { background:#FEE2E2!important;color:#991B1B;font-weight:600;border-radius:6px; }
+# .gpa-dash { color:#CBD5E1; }
+# .sb-step   { padding:6px 0;font-size:.85rem;display:flex;align-items:center;gap:8px; }
+# .sb-done   { color:#4ADE80!important; }
+# .sb-active { color:#60A5FA!important;font-weight:700!important; }
+# .sb-pending{ color:#475569!important; }
+# .sb-sem    { font-size:.8rem;display:flex;align-items:center;gap:6px;padding:4px 0;
+#              border-bottom:1px solid rgba(255,255,255,.07); }
+# .upload-zone { border:2px dashed #CBD5E1;border-radius:12px;padding:40px;
+#                text-align:center;background:#F8FAFC;margin-bottom:16px; }
+# .upload-zone h3 { color:#0F2444;margin:0 0 8px 0;font-size:1.1rem; }
+# .upload-zone p  { color:#64748B;margin:0;font-size:.88rem; }
+# .divider { border:none;border-top:1px solid #E2E8F0;margin:20px 0; }
+# .block-container { padding-top:2rem!important; }
+# /* Per-file section separator */
+# .file-section { border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;
+#                 margin-bottom:14px;background:#FAFBFC; }
+# .file-section-header { font-size:.82rem;font-weight:700;color:#0F2444;
+#                        display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+# /* Historical banner */
+# .hist-banner { background:linear-gradient(135deg,#F0F9FF,#E0F2FE);border:1px solid #BAE6FD;
+#                border-left:4px solid #0284C7;border-radius:8px;padding:12px 18px;
+#                margin:10px 0;color:#0C4A6E; }
+# </style>
+# """, unsafe_allow_html=True)
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # CONSTANTS
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# EXPECTED_STRENGTH: dict[str, int] = {
+#     "Semester 1": 20, "Semester 2": 20, "Semester 3": 20, "Semester 4": 19,
+#     "Semester 5": 18, "Semester 6": 18, "Semester 7": 18, "Semester 8": 18,
+# }
+# ALL_SEMESTERS = list(EXPECTED_STRENGTH.keys())
+# DEFAULT_DB    = os.getenv("DATABASE_URL", "sqlite:///./gpa_system.db")
+
+# EDITOR_COLS = [
+#     "student_name", "roll_no", "father_name",
+#     "subject_name", "total_marks", "obtained_marks",
+#     "credit_hours", "department",
+# ]
+
+# # Semester dropdown options used in the Assign stage
+# _SEM_OPTIONS: list[str] = ["(Select Semester…)"] + [f"Semester {n}" for n in range(1, 9)]
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # CONTENT-BASED SEMESTER & SUBJECT DETECTION
+# # Works regardless of filename.  Scans the first 15 rows of any .xlsx/.csv
+# # for university metadata (rows 1-6 typically contain institution, dept,
+# # subject, semester, session, date — before the actual data header row).
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def _prettify_subject_local(raw: str) -> str:
+#     """
+#     Local fallback for subject prettification when parser_agent is not importable.
+#     'SoftEng' → 'Soft Eng'  |  'DataStructures' → 'Data Structures'
+#     """
+#     s = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw)
+#     s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+#     s = s.replace("_", " ").replace("-", " ")
+#     s = re.sub(r"\s+", " ", s).strip()
+#     return s.title() if len(s) > 2 else s.upper()
+
+
+# def _do_prettify(raw: str) -> str:
+#     """Use parser_agent._prettify_subject if available, else local fallback."""
+#     if _PARSER_OK:
+#         try:
+#             return _prettify_subject(raw)
+#         except Exception:
+#             pass
+#     return _prettify_subject_local(raw)
+
+
+# # Semester regex patterns applied to individual cell values (three layouts)
+# _CONTENT_SEM_PATTERNS: list[re.Pattern] = [
+#     # "Semester: 3"  "Sem: 3"  "Semester No. 3"  "Sem-3"
+#     re.compile(r'(?:semester|sem)(?:ester)?\s*(?:no\.?|number|#)?\s*[:\-–]?\s*(\d)', re.I),
+#     # "3rd Semester"  "3 Semester"
+#     re.compile(r'(\d)\s*(?:st|nd|rd|th)?\s+semester', re.I),
+#     # "Semester 3"  (space-separated, number after)
+#     re.compile(r'(?:semester|sem)(?:ester)?\s+(\d)\b', re.I),
+# ]
+
+# # Keywords treated as semester-key cells (for two-cell "Semester | 3" format)
+# _SEM_KEY_CELLS: frozenset[str] = frozenset({
+#     'semester', 'sem', 'semester no', 'sem no',
+#     'semester number', 'sem number', 'semester#', 'sem.',
+#     'semester no.', 'semester no:', 'sem no.',
+# })
+
+# # Keywords treated as subject-key cells
+# _SUBJ_KEY_CELLS: frozenset[str] = frozenset({
+#     'subject', 'subject name', 'course', 'course name',
+#     'paper', 'paper name', 'paper title', 'course title', 'subject title',
+# })
+
+# # Data-column indicators — stop metadata scan when we hit this row
+# # (prevents false positives from "Subject Name" in the actual column header row)
+# _DATA_COL_INDICATORS: frozenset[str] = frozenset({
+#     'roll', 'marks', 'obtained', 'credit', 'grade', 'percentage', 'scored',
+# })
+
+
+# def extract_meta_from_content(
+#     file_bytes: bytes,
+#     filename: str,
+# ) -> tuple[str | None, str | None]:
+#     """
+#     Scan the first 15 rows of an Excel/CSV file to detect:
+#       • semester_label  — "Semester N" (N = 1–8)
+#       • subject_name    — prettified subject string
+
+#     Three cell layouts handled:
+#       A) Single-cell colon  : "Semester: 3"  /  "Subject: Operating Systems"
+#       B) Two-cell key–value : | Semester | 3 |  /  | Subject | OS |
+#       C) Free text in cell  : "3rd Semester" appearing anywhere
+
+#     Stops scanning as soon as both values are found, OR when it encounters
+#     a row that looks like the student-data column header (≥3 cells with ≥2
+#     data-column keywords such as 'roll', 'marks', 'obtained', 'credit').
+#     This prevents picking up "Subject Name" from the header row as a subject.
+
+#     Returns (semester_label, subject_name); either may be None.
+#     """
+#     ext = Path(filename).suffix.lower()
+#     buf = io.BytesIO(file_bytes)
+#     try:
+#         df_raw = (
+#             pd.read_csv(buf, header=None, dtype=str, nrows=15)
+#             if ext == ".csv"
+#             else pd.read_excel(buf, header=None, dtype=str, nrows=15, engine="openpyxl")
+#         )
+#     except Exception:
+#         return None, None
+
+#     semester_label: str | None = None
+#     subject_name:   str | None = None
+
+#     def _try_sem(text: str) -> str | None:
+#         """Return 'Semester N' if text matches any semester pattern, else None."""
+#         for pat in _CONTENT_SEM_PATTERNS:
+#             m = pat.search(text)
+#             if m:
+#                 try:
+#                     n = int(m.group(1))
+#                     if 1 <= n <= 8:
+#                         return f"Semester {n}"
+#                 except (ValueError, IndexError):
+#                     pass
+#         return None
+
+#     def _is_data_header(cells: list[str]) -> bool:
+#         """Return True when this row looks like the student-data column header."""
+#         if len(cells) < 3:
+#             return False
+#         joined = " ".join(c.lower() for c in cells)
+#         hits = sum(1 for kw in _DATA_COL_INDICATORS if kw in joined)
+#         return hits >= 2
+
+#     for row_i in range(min(15, len(df_raw))):
+#         # Collect non-null, non-empty cell strings for this row
+#         cells = [
+#             str(v).strip()
+#             for v in df_raw.iloc[row_i].values
+#             if pd.notna(v) and str(v).strip().lower() not in ("", "nan", "none")
+#         ]
+#         if not cells:
+#             continue
+
+#         # Stop scanning once we hit the actual student-data header row
+#         if _is_data_header(cells):
+#             break
+
+#         for col_j, cell in enumerate(cells):
+#             cell_lower = cell.lower().strip()
+
+#             # ── Semester detection ─────────────────────────────────────────────
+#             if semester_label is None:
+#                 # Layout C / A  — value embedded in the cell itself
+#                 found = _try_sem(cell)
+#                 if found:
+#                     semester_label = found
+#                 else:
+#                     # Layout B — key cell ("Semester") + next-cell value ("3")
+#                     key_norm = cell_lower.rstrip(":").strip()
+#                     if key_norm in _SEM_KEY_CELLS and col_j + 1 < len(cells):
+#                         val = cells[col_j + 1].strip()
+#                         # Value might be a bare digit or "S3" style
+#                         try:
+#                             n = int(float(val))
+#                             if 1 <= n <= 8:
+#                                 semester_label = f"Semester {n}"
+#                         except (ValueError, TypeError):
+#                             m = re.match(r"^S(\d)$", val, re.I)
+#                             if m:
+#                                 n = int(m.group(1))
+#                                 if 1 <= n <= 8:
+#                                     semester_label = f"Semester {n}"
+
+#             # ── Subject detection ──────────────────────────────────────────────
+#             if subject_name is None:
+#                 if ":" in cell:
+#                     # Layout A — "Subject: Operating Systems"
+#                     key_part = cell.split(":", 1)[0].strip().lower()
+#                     val_part = cell.split(":", 1)[1].strip()
+#                     if key_part in _SUBJ_KEY_CELLS and val_part and len(val_part) > 1:
+#                         subject_name = _do_prettify(val_part)
+#                 else:
+#                     # Layout B — | Subject | Operating Systems |
+#                     key_norm = cell_lower.rstrip(":").strip()
+#                     if key_norm in _SUBJ_KEY_CELLS and col_j + 1 < len(cells):
+#                         val = cells[col_j + 1].strip()
+#                         # Guard: skip if the next cell looks like a semester value
+#                         if val and len(val) > 1 and not _try_sem(val):
+#                             subject_name = _do_prettify(val)
+
+#         if semester_label and subject_name:
+#             break   # both found — no need to scan further rows
+
+#     return semester_label, subject_name
+
+
+# def _safe_key(s: str) -> str:
+#     """Convert any string to a safe Streamlit widget key (no spaces/special chars)."""
+#     return re.sub(r"[^a-zA-Z0-9]", "_", s)
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # UTILITY FUNCTIONS
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def sem_num(label: str) -> int:
+#     m = re.search(r"(\d+)", label)
+#     return int(m.group(1)) if m else 0
+
+
+# def fmt_size(b: int) -> str:
+#     return f"{b/1024:.1f} KB" if b < 1_048_576 else f"{b/1_048_576:.1f} MB"
+
+
+# def records_to_df(records: list[dict]) -> pd.DataFrame:
+#     rows = [{c: r.get(c) for c in EDITOR_COLS} for r in records]
+#     df = pd.DataFrame(rows, columns=EDITOR_COLS)
+#     for col in ("total_marks", "obtained_marks"):
+#         df[col] = pd.to_numeric(df[col], errors="coerce")
+#     df["credit_hours"] = pd.to_numeric(df["credit_hours"], errors="coerce")
+#     return df
+
+
+# def df_to_records(df: pd.DataFrame) -> list[dict]:
+#     out: list[dict] = []
+#     for _, row in df.iterrows():
+#         rec: dict[str, Any] = {"has_issues": False, "parse_warnings": []}
+#         for col in EDITOR_COLS:
+#             val = row.get(col)
+#             is_null = (val is None
+#                        or (isinstance(val, float) and pd.isna(val))
+#                        or str(val).strip() in ("", "nan", "None", "NaT"))
+#             if is_null:
+#                 rec[col] = None
+#                 continue
+#             if col in ("total_marks", "obtained_marks"):
+#                 try:
+#                     rec[col] = float(val)
+#                 except (ValueError, TypeError):
+#                     rec[col] = str(val)
+#                     rec["has_issues"] = True
+#                     rec["parse_warnings"].append(f"'{val}' not numeric for {col}.")
+#             elif col == "credit_hours":
+#                 try:
+#                     rec[col] = int(float(val))
+#                 except (ValueError, TypeError):
+#                     rec[col] = str(val)
+#                     rec["has_issues"] = True
+#                     rec["parse_warnings"].append(f"'{val}' not integer for credit_hours.")
+#             else:
+#                 rec[col] = str(val).strip()
+#         out.append(rec)
+#     return out
+
+
+# def infer_academic_year(sn: int) -> str:
+#     override = st.session_state.get("academic_year", "").strip()
+#     if override:
+#         return override
+#     y = datetime.now().year - (sn - 1) // 2
+#     return f"{y}-{y + 1}"
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # SESSION STATE
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def _init() -> None:
+#     defaults: dict[str, Any] = {
+#         "stage"            : "upload",
+#         "raw_files"        : {},   # {fname: bytes}
+#         "file_assignments" : {},   # {fname: "Semester N" | None}
+#         "file_subjects"    : {},   # {fname: subject_hint_str}
+#         "detection_source" : {},   # {fname: "content" | "filename" | "none"}
+#         "semester_groups"  : {},   # {sem: [fname, …]}
+#         "sem_file_records" : {},   # {sem: {fname: list[dict]}}
+#         "sem_file_dfs"     : {},   # {sem: {fname: pd.DataFrame}}
+#         "sem_records"      : {},   # {sem: list[dict]}  — combined for calculator
+#         "approvals"        : {},   # {sem: bool}
+#         "val_reports"      : {},   # {sem: report_dict}  (legacy compat)
+#         "ordered_sems"     : [],
+#         "calc_results"     : None,
+#         "final_saved"      : False,
+#         "db_url"           : DEFAULT_DB,
+#         "academic_year"    : "",
+#         "invalid_files"    : [],   # kept for legacy compat; always empty now
+#     }
+#     for k, v in defaults.items():
+#         st.session_state.setdefault(k, v)
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # SIDEBAR
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_sidebar() -> None:
+#     with st.sidebar:
+#         st.markdown("""
+#         <div style="padding:16px 0 8px 0">
+#             <div style="font-size:1.4rem;font-weight:800;color:#F1F5F9;letter-spacing:-.5px">
+#                 🎓 GPA System
+#             </div>
+#             <div style="font-size:.75rem;color:#94A3B8;margin-top:2px">
+#                 University of Loralai · CS Dept
+#             </div>
+#         </div>""", unsafe_allow_html=True)
+#         st.divider()
+
+#         st.markdown('<div class="section-label" style="color:#475569">Pipeline</div>',
+#                     unsafe_allow_html=True)
+#         stages  = ["upload", "assign", "review", "calculate", "results"]
+#         labels  = ["Upload Files", "Review Assignments", "HITL Review (Tabs)",
+#                    "GPA Calculation", "Results & Save"]
+#         icons   = ["📁", "🗂️", "📋", "⚙️", "📊"]
+#         cur     = st.session_state.stage
+#         cur_idx = stages.index(cur)
+
+#         for i, (s, lbl, ico) in enumerate(zip(stages, labels, icons)):
+#             cls    = ("sb-step sb-done" if i < cur_idx
+#                       else "sb-step sb-active" if i == cur_idx
+#                       else "sb-step sb-pending")
+#             prefix = "✓" if i < cur_idx else "▶" if i == cur_idx else "○"
+#             st.markdown(
+#                 f'<div class="{cls}"><span style="font-size:1rem">{ico}</span>'
+#                 f'<span>{prefix} {lbl}</span></div>',
+#                 unsafe_allow_html=True,
+#             )
+
+#         st.divider()
+
+#         ordered = st.session_state.ordered_sems
+#         if ordered:
+#             st.markdown('<div class="section-label" style="color:#475569">Semester Status</div>',
+#                         unsafe_allow_html=True)
+#             for sem in ordered:
+#                 ok    = st.session_state.approvals.get(sem, False)
+#                 files = st.session_state.semester_groups.get(sem, [])
+#                 icon  = "✅" if ok else "🔵"
+#                 st.markdown(
+#                     f'<div class="sb-sem"><span>{icon}</span>'
+#                     f'<span style="flex:1;font-size:.8rem">{sem}</span>'
+#                     f'<span style="font-size:.7rem;color:#475569">{len(files)} file(s)</span>'
+#                     f'</div>',
+#                     unsafe_allow_html=True,
+#                 )
+#             st.divider()
+
+#         st.markdown('<div class="section-label" style="color:#475569">System Health</div>',
+#                     unsafe_allow_html=True)
+
+#         def _health(ok: bool, label: str) -> None:
+#             c, dot = ("#4ADE80", "●") if ok else ("#F87171", "●")
+#             st.markdown(
+#                 f'<div class="sb-step"><span style="color:{c}">{dot}</span>'
+#                 f'<span>{label}</span></div>',
+#                 unsafe_allow_html=True,
+#             )
+
+#         _health(_PARSER_OK,    "Parser Agent")
+#         _health(_VALIDATOR_OK, "Validation Agent")
+#         _health(_CALC_OK,      "Calculator Agent")
+
+#         if _ERRORS:
+#             with st.expander("⚠️ Import Errors"):
+#                 for e in _ERRORS:
+#                     st.error(e, icon="🚫")
+
+#         st.divider()
+
+#         with st.expander("⚙️ Settings"):
+#             st.session_state.db_url = st.text_input(
+#                 "Database URL", value=st.session_state.db_url,
+#                 help="SQLite (dev) or PostgreSQL (prod)"
+#             )
+#             st.session_state.academic_year = st.text_input(
+#                 "Academic Year", value=st.session_state.academic_year,
+#                 placeholder="e.g. 2024-2025", help="Leave blank to auto-infer"
+#             )
+
+#         st.markdown(
+#             '<div style="font-size:.7rem;color:#475569;margin-top:12px">'
+#             'v2.1 · HEC Pakistan GPA Standard</div>',
+#             unsafe_allow_html=True,
+#         )
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # STAGE 0 — UPLOAD  (file-name independent — content-based detection)
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_upload() -> None:
+#     st.markdown('<div class="stage-title">📁 Upload Mark Sheet Files</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         '<div class="stage-subtitle">'
+#         'Upload any <code>.xlsx</code> or <code>.csv</code> mark sheet — '
+#         '<b>any filename is accepted</b>. '
+#         'Semester and subject are auto-detected from the file\'s own content '
+#         '(the university metadata rows at the top of each sheet). '
+#         'If detection fails you can assign them manually on the next step.'
+#         '</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     uploaded = st.file_uploader(
+#         "Drop mark sheet files here",
+#         type=["xlsx", "csv"],
+#         accept_multiple_files=True,
+#         label_visibility="collapsed",
+#     )
+
+#     with st.expander("📊 HOD Ground-Truth Student Strength Baseline"):
+#         cols = st.columns(4)
+#         for i, (sem, n) in enumerate(EXPECTED_STRENGTH.items()):
+#             cols[i % 4].metric(sem, f"{n} students")
+
+#     if not uploaded:
+#         st.markdown("""
+#         <div class="upload-zone">
+#             <h3>📂 No files uploaded yet</h3>
+#             <p>Upload one <code>.xlsx</code> or <code>.csv</code> file per subject per semester.<br>
+#                <b>Any filename is accepted</b> — semester and subject are read from file content.<br>
+#                If auto-detection cannot find them, you assign manually on the next step.</p>
+#         </div>""", unsafe_allow_html=True)
+#         return
+
+#     # ── Accept all uploaded files regardless of filename ──────────────────────
+#     valid_files: dict[str, bytes] = {}
+#     for uf in uploaded:
+#         valid_files[uf.name] = uf.read()
+
+#     # ── Content-based detection for every file ────────────────────────────────
+#     auto_sem: dict[str, str | None] = {}
+#     auto_sub: dict[str, str]        = {}
+#     detection_source: dict[str, str] = {}   # "content" | "filename" | "none"
+
+#     for fname, data in valid_files.items():
+#         sem_label, subject = extract_meta_from_content(data, fname)
+
+#         if sem_label:
+#             auto_sem[fname]          = sem_label
+#             detection_source[fname]  = "content"
+#         else:
+#             # Secondary: try filename-based detection (handles legacy S{N}-... names)
+#             fl_sem: str | None = None
+#             fl_sub: str | None = None
+#             if _PARSER_OK:
+#                 try:
+#                     fl_sem, fl_sub = detect_semester_and_subject(fname)
+#                 except Exception:
+#                     pass
+#             if fl_sem:
+#                 auto_sem[fname]         = fl_sem
+#                 detection_source[fname] = "filename"
+#                 if not subject and fl_sub:
+#                     subject = fl_sub
+#             else:
+#                 auto_sem[fname]         = None     # user must assign manually
+#                 detection_source[fname] = "none"
+
+#         auto_sub[fname] = subject or ""
+
+#     # ── Summary metrics ────────────────────────────────────────────────────────
+#     n_detected   = sum(1 for v in auto_sem.values() if v is not None)
+#     n_undetected = len(valid_files) - n_detected
+#     sem_groups_preview: dict[str, list[str]] = {}
+#     for fname, sem in auto_sem.items():
+#         if sem:
+#             sem_groups_preview.setdefault(sem, []).append(fname)
+
+#     c1, c2, c3, c4 = st.columns(4)
+#     c1.metric("Files Uploaded",         len(valid_files))
+#     c2.metric("Semester Auto-Detected", n_detected)
+#     c3.metric("Needs Manual Assignment", n_undetected,
+#               delta=f"!{n_undetected}" if n_undetected else None,
+#               delta_color="inverse" if n_undetected else "off")
+#     c4.metric("Semesters Found",         len(sem_groups_preview))
+
+#     if n_undetected == 0:
+#         st.markdown(
+#             '<div class="banner banner-success">✅ Semester detected from content for all '
+#             'files. Review assignments on the next step.</div>',
+#             unsafe_allow_html=True,
+#         )
+#     else:
+#         st.markdown(
+#             f'<div class="banner banner-warning">⚠️ Semester could not be detected in '
+#             f'<b>{n_undetected}</b> file(s). '
+#             f'You can assign semesters manually on the next step — the pipeline will not '
+#             f'proceed until every file has a semester.</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#     # ── File list ──────────────────────────────────────────────────────────────
+#     st.markdown('<div class="section-label" style="margin-top:16px">Detected Files</div>',
+#                 unsafe_allow_html=True)
+#     hdr = st.columns([3, 1.1, 2.3, 2.1, 1.3])
+#     for lbl in ("Filename", "Size", "Semester Detected", "Subject Detected", "Source"):
+#         hdr[("Filename", "Size", "Semester Detected", "Subject Detected", "Source").index(lbl)]\
+#             .markdown(
+#                 f'<div style="font-size:.75rem;font-weight:700;color:#64748B;'
+#                 f'text-transform:uppercase;letter-spacing:.8px">{lbl}</div>',
+#                 unsafe_allow_html=True,
+#             )
+
+#     _src_badge = {
+#         "content" : '<span class="badge badge-clean"  title="Detected from file content">📄 Content</span>',
+#         "filename": '<span class="badge badge-info"   title="Detected from filename">📁 Filename</span>',
+#         "none"    : '<span class="badge badge-flagged" title="Manual assignment needed">✏️ Manual</span>',
+#     }
+
+#     for fname, data in valid_files.items():
+#         c = st.columns([3, 1.1, 2.3, 2.1, 1.3])
+#         sem = auto_sem.get(fname)
+#         sub = auto_sub.get(fname) or "—"
+#         src = detection_source.get(fname, "none")
+
+#         c[0].markdown(f'<div class="file-chip">📄 {fname}</div>', unsafe_allow_html=True)
+#         c[1].markdown(
+#             f'<span style="font-size:.82rem;color:#64748B">{fmt_size(len(data))}</span>',
+#             unsafe_allow_html=True,
+#         )
+#         if sem:
+#             c[2].markdown(f'<span class="badge badge-clean">✓ {sem}</span>',
+#                           unsafe_allow_html=True)
+#         else:
+#             c[2].markdown('<span class="badge badge-blocked">⚠ Not Detected</span>',
+#                           unsafe_allow_html=True)
+#         c[3].markdown(
+#             f'<span style="font-size:.82rem;color:#374151">{sub}</span>',
+#             unsafe_allow_html=True,
+#         )
+#         c[4].markdown(_src_badge.get(src, ""), unsafe_allow_html=True)
+
+#     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+#     if st.button("Next → Review Assignments", type="primary", use_container_width=True):
+#         st.session_state.raw_files        = valid_files
+#         st.session_state.file_assignments = dict(auto_sem)
+#         st.session_state.file_subjects    = dict(auto_sub)
+#         st.session_state.detection_source = detection_source
+#         st.session_state.invalid_files    = []
+#         st.session_state.stage            = "assign"
+#         st.rerun()
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # STAGE 1 — ASSIGN  (semester is now an editable dropdown, not read-only)
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_assign() -> None:
+#     st.markdown('<div class="stage-title">🗂️ Review & Confirm Assignments</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         '<div class="stage-subtitle">'
+#         'Review auto-detected semester and subject assignments. '
+#         'Use the <b>Semester</b> dropdown to correct any wrong detection or to assign '
+#         'files where detection failed. '
+#         'Every file must have a semester before you can proceed to HITL review.'
+#         '</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     raw              = st.session_state.raw_files
+#     # Read stored assignments as the starting values; widgets may override them below
+#     stored_assigns   = st.session_state.file_assignments   # {fname: sem | None}
+#     subjects         = dict(st.session_state.file_subjects)
+#     detection_source = st.session_state.get("detection_source", {})
+
+#     # ── Assignment table (one row per file) ───────────────────────────────────
+#     st.markdown('<div class="card">', unsafe_allow_html=True)
+#     st.markdown(
+#         '<div class="section-label">File Assignments — Semester (Editable) · Subject (Editable)</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     # Collect current widget values into a fresh assigns dict
+#     assigns: dict[str, str | None] = {}
+
+#     for i, (fname, data) in enumerate(raw.items()):
+#         col_f, col_sz, col_sem, col_sub, col_src = st.columns([2.5, 0.9, 2, 2.5, 1.1])
+
+#         col_f.markdown(
+#             f'<div style="padding-top:8px"><span class="file-chip">📄 {fname}</span></div>',
+#             unsafe_allow_html=True,
+#         )
+#         col_sz.markdown(
+#             f'<div style="padding-top:10px;font-size:.8rem;color:#64748B">'
+#             f'{fmt_size(len(data))}</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#         # Semester selectbox — pre-fill from stored detection, editable by user
+#         stored_sem = stored_assigns.get(fname)
+#         sem_idx    = (
+#             _SEM_OPTIONS.index(stored_sem)
+#             if stored_sem and stored_sem in _SEM_OPTIONS
+#             else 0
+#         )
+#         selected_sem = col_sem.selectbox(
+#             label             = f"sem_{fname}",
+#             options           = _SEM_OPTIONS,
+#             index             = sem_idx,
+#             key               = f"sem_sel_{i}_{_safe_key(fname)}",
+#             label_visibility  = "collapsed",
+#         )
+#         assigns[fname] = selected_sem if selected_sem != _SEM_OPTIONS[0] else None
+
+#         # Subject text input — editable
+#         sub_val = col_sub.text_input(
+#             label            = f"sub_{fname}",
+#             value            = subjects.get(fname) or "",
+#             placeholder      = "Subject name",
+#             label_visibility = "collapsed",
+#             key              = f"sub_inp_{i}_{_safe_key(fname)}",
+#         )
+#         subjects[fname] = sub_val.strip()
+
+#         # Detection-source badge (informational)
+#         src = detection_source.get(fname, "none")
+#         _src_html = {
+#             "content" : '<span class="badge badge-clean"  title="Detected from file content">📄 Auto</span>',
+#             "filename": '<span class="badge badge-info"   title="Detected from filename">📁 Name</span>',
+#             "none"    : '<span class="badge badge-flagged" title="Manually assigned">✏️ Manual</span>',
+#         }
+#         col_src.markdown(
+#             f'<div style="padding-top:10px">{_src_html.get(src, "")}</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#     st.markdown('</div>', unsafe_allow_html=True)
+
+#     # ── Unassigned-file warning ────────────────────────────────────────────────
+#     unassigned = [f for f, s in assigns.items() if not s]
+#     if unassigned:
+#         st.markdown(
+#             f'<div class="banner banner-warning">⚠️ '
+#             f'<b>{len(unassigned)}</b> file(s) still need a semester assigned: '
+#             + ", ".join(f"<code>{f}</code>" for f in unassigned) +
+#             "</div>",
+#             unsafe_allow_html=True,
+#         )
+
+#     # ── Assignment summary by semester ─────────────────────────────────────────
+#     sem_groups: dict[str, list[str]] = {}
+#     for fname, sem in assigns.items():
+#         if sem:
+#             sem_groups.setdefault(sem, []).append(fname)
+
+#     if sem_groups:
+#         st.markdown('<div class="section-label" style="margin-top:8px">Assignment Summary</div>',
+#                     unsafe_allow_html=True)
+#         sem_cols = st.columns(min(len(sem_groups), 4))
+#         for i, (sem, files) in enumerate(
+#             sorted(sem_groups.items(), key=lambda x: sem_num(x[0]))
+#         ):
+#             expected = EXPECTED_STRENGTH.get(sem, 0)
+#             sem_cols[i % 4].markdown(f"""<div class="kpi-box">
+#                 <div class="kpi-value">{len(files)}</div>
+#                 <div class="kpi-label">{sem}</div>
+#                 <div style="font-size:.75rem;color:#94A3B8;margin-top:4px">
+#                     {len(files)} subject file(s) · Expected {expected} students
+#                 </div></div>""", unsafe_allow_html=True)
+
+#     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+#     bc1, bc2 = st.columns([1, 5])
+#     with bc1:
+#         if st.button("← Back", use_container_width=True):
+#             st.session_state.stage = "upload"
+#             st.rerun()
+#     with bc2:
+#         can_proceed = len(unassigned) == 0 and bool(sem_groups)
+#         if st.button(
+#             "Begin HITL Review →",
+#             type                = "primary",
+#             use_container_width = True,
+#             disabled            = not can_proceed,
+#         ):
+#             ordered = sorted(sem_groups.keys(), key=sem_num)
+#             # Persist the user-edited assignments back to session state
+#             st.session_state.file_assignments = assigns
+#             st.session_state.file_subjects    = subjects
+#             st.session_state.semester_groups  = sem_groups
+#             st.session_state.ordered_sems     = ordered
+#             st.session_state.approvals        = {}
+#             st.session_state.sem_file_records = {}
+#             st.session_state.sem_file_dfs     = {}
+#             st.session_state.sem_records      = {}
+#             st.session_state.val_reports      = {}
+#             st.session_state.calc_results     = None
+#             st.session_state.final_saved      = False
+#             st.session_state.stage            = "review"
+#             st.rerun()
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # STAGE 2 — REVIEW  (tab-based — one tab per semester, all visible at once)
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_review() -> None:
+#     ordered = st.session_state.ordered_sems
+#     if not ordered:
+#         st.session_state.stage = "calculate"
+#         st.rerun()
+#         return
+
+#     approved_count = sum(1 for s in ordered if st.session_state.approvals.get(s, False))
+#     total          = len(ordered)
+
+#     st.markdown('<div class="stage-title">📋 HITL Review — Semester Tabs</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         f'<div class="stage-subtitle">Each tab is one semester. '
+#         f'Validate each file independently, fix any BLOCKED errors, then approve. '
+#         f'<b>{approved_count} / {total}</b> semesters approved.</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     # Overall progress banner
+#     if approved_count == total:
+#         st.markdown(
+#             '<div class="banner banner-success">✅ All semesters approved! '
+#             'Click below to run GPA calculation.</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#     # ── Semester tabs ──────────────────────────────────────────────────────────
+#     tab_labels = [
+#         f"✅ {s}" if st.session_state.approvals.get(s, False) else s
+#         for s in ordered
+#     ]
+#     tabs = st.tabs(tab_labels)
+#     for tab, sem in zip(tabs, ordered):
+#         with tab:
+#             _review_tab_panel(sem)
+
+#     # ── Bottom navigation ──────────────────────────────────────────────────────
+#     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+#     bc1, bc2 = st.columns([1, 4])
+#     with bc1:
+#         if st.button("← Back", use_container_width=True):
+#             st.session_state.stage = "assign"
+#             st.rerun()
+#     with bc2:
+#         btn_label = (
+#             f"Proceed to GPA Calculation ({approved_count}/{total} approved) →"
+#         )
+#         if st.button(btn_label, type="primary",
+#                      disabled=(approved_count < total), use_container_width=True):
+#             st.session_state.stage = "calculate"
+#             st.rerun()
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # REVIEW TAB HELPERS
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def _parse_semester_files(sem: str) -> None:
+#     """
+#     Parse every file assigned to *sem* SEPARATELY (not combined).
+#     Stores results in:
+#       st.session_state.sem_file_records[sem] = {fname: list[dict]}
+#       st.session_state.sem_file_dfs[sem]     = {fname: pd.DataFrame}
+#     """
+#     groups     = st.session_state.semester_groups.get(sem, [])
+#     raw        = st.session_state.raw_files
+#     subj_hints = st.session_state.file_subjects
+
+#     file_records: dict[str, list[dict]]    = {}
+#     file_dfs    : dict[str, pd.DataFrame] = {}
+
+#     for fname in groups:
+#         fb       = raw.get(fname, b"")
+#         sub_hint = subj_hints.get(fname)
+
+#         if _PARSER_OK:
+#             try:
+#                 result = parse_file_to_records(fb, fname, subject_hint=sub_hint)
+#             except Exception as exc:
+#                 result = {
+#                     "status": "ERROR", "records": [],
+#                     "warnings": [str(exc)], "file_name": fname,
+#                 }
+#         else:
+#             result = _fallback_parse(fb, fname, sub_hint)
+
+#         if result.get("status") == "ERROR":
+#             for w in result.get("warnings", []):
+#                 st.error(f"**{fname}**: {w}", icon="🚫")
+#             file_records[fname] = []
+#             file_dfs[fname]     = pd.DataFrame(columns=EDITOR_COLS)
+#         else:
+#             for w in result.get("warnings", []):
+#                 st.warning(f"**{fname}**: {w}", icon="⚠️")
+#             recs = result.get("records", [])
+#             file_records[fname] = recs
+#             file_dfs[fname]     = records_to_df(recs)
+
+#     if "sem_file_records" not in st.session_state:
+#         st.session_state.sem_file_records = {}
+#     if "sem_file_dfs" not in st.session_state:
+#         st.session_state.sem_file_dfs = {}
+
+#     st.session_state.sem_file_records[sem] = file_records
+#     st.session_state.sem_file_dfs[sem]     = file_dfs
+
+
+# def _show_historical_context(sn: int) -> None:
+#     """
+#     For Semester 2+, query the DB for existing SemesterGPA rows from
+#     previous semesters and display them as read-only historical context.
+#     CGPA calculation will automatically include these via recompute_cgpa().
+#     """
+#     if not _CALC_OK:
+#         return
+#     try:
+#         engine = get_engine(st.session_state.db_url)
+#         with Session(engine) as sess:
+#             prev_sgpas = sess.execute(
+#                 sa_select(SemesterGPA).where(SemesterGPA.semester < sn)
+#             ).scalars().all()
+
+#         if not prev_sgpas:
+#             st.markdown(
+#                 f'<div class="hist-banner">ℹ️ <b>Historical Data:</b> No Semester 1–{sn-1} '
+#                 f'data found in the database yet. CGPA for this semester will only include '
+#                 f'the records you are uploading now.</div>',
+#                 unsafe_allow_html=True,
+#             )
+#             return
+
+#         by_sem: dict[int, list] = {}
+#         for sg in prev_sgpas:
+#             by_sem.setdefault(sg.semester, []).append(sg)
+
+#         st.markdown('<div class="card">', unsafe_allow_html=True)
+#         st.markdown(
+#             f'<div class="section-label">📚 Historical DB Data — '
+#             f'Semesters 1–{sn-1} (read-only · auto-included in CGPA)</div>',
+#             unsafe_allow_html=True,
+#         )
+#         st.markdown(
+#             '<div style="font-size:.82rem;color:#0C4A6E;margin-bottom:12px">'
+#             'These GPA values are already stored in the database from a previous session. '
+#             'When GPA is calculated for this semester, '
+#             '<b>recompute_cgpa()</b> will automatically pool them to produce the '
+#             'cumulative CGPA — no re-upload of earlier semesters needed.</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#         hist_cols = st.columns(min(len(by_sem), 4))
+#         for i, (prev_sn, sgpa_list) in enumerate(sorted(by_sem.items())):
+#             valid_gpas = [sg.gpa for sg in sgpa_list if sg.gpa is not None]
+#             avg_gpa    = sum(valid_gpas) / len(valid_gpas) if valid_gpas else None
+#             hist_cols[i % 4].markdown(f"""<div class="kpi-box">
+#                 <div class="kpi-value" style="font-size:1.6rem">
+#                     {f"{avg_gpa:.2f}" if avg_gpa else "—"}
+#                 </div>
+#                 <div class="kpi-label">Sem {prev_sn} Avg GPA</div>
+#                 <div style="font-size:.72rem;color:#94A3B8;margin-top:4px">
+#                     {len(sgpa_list)} student record(s) in DB
+#                 </div></div>""", unsafe_allow_html=True)
+
+#         st.markdown('</div>', unsafe_allow_html=True)
+
+#     except Exception:
+#         pass
+
+
+# def _review_tab_panel(sem: str) -> None:
+#     """
+#     Full review panel for one semester, shown inside its st.tab().
+
+#     Layout:
+#       A · Student Strength Verification
+#       B · Historical Context  (Semester 2+ only)
+#       C · Per-File Validation + Editor
+#       D · Approve button
+#     """
+#     is_approved = st.session_state.approvals.get(sem, False)
+#     sn          = sem_num(sem)
+
+#     if is_approved:
+#         st.markdown(
+#             f'<div class="banner banner-success">✅ {sem} is approved and ready '
+#             f'for GPA calculation.</div>',
+#             unsafe_allow_html=True,
+#         )
+#         if st.button(f"🔓 Re-open {sem} for editing", key=f"reopen_{sem}"):
+#             st.session_state.approvals[sem] = False
+#             st.rerun()
+#         return
+
+#     files_for_sem = st.session_state.semester_groups.get(sem, [])
+
+#     # ── Parse files once (per session) ────────────────────────────────────────
+#     if sem not in st.session_state.get("sem_file_records", {}):
+#         with st.spinner(f"Parsing {len(files_for_sem)} file(s) for {sem}…"):
+#             _parse_semester_files(sem)
+
+#     file_records = st.session_state.sem_file_records.get(sem, {})
+#     file_dfs     = st.session_state.sem_file_dfs.get(sem, {})
+
+#     # ── A · Student Strength ───────────────────────────────────────────────────
+#     st.markdown('<div class="card">', unsafe_allow_html=True)
+#     st.markdown('<div class="section-label">A · Student Strength Verification</div>',
+#                 unsafe_allow_html=True)
+
+#     all_rolls: set[str] = set()
+#     for recs in file_records.values():
+#         for r in recs:
+#             roll = str(r.get("roll_no") or "").strip()
+#             if roll:
+#                 all_rolls.add(roll)
+
+#     expected       = EXPECTED_STRENGTH.get(sem, 0)
+#     distinct_rolls = len(all_rolls)
+#     total_rows     = sum(len(recs) for recs in file_records.values())
+
+#     k1, k2, k3, k4 = st.columns(4)
+#     k1.markdown(f"""<div class="kpi-box"><div class="kpi-value">{expected}</div>
+#         <div class="kpi-label">Expected</div></div>""", unsafe_allow_html=True)
+#     k2.markdown(f"""<div class="kpi-box"><div class="kpi-value">{distinct_rolls}</div>
+#         <div class="kpi-label">Distinct Students</div></div>""", unsafe_allow_html=True)
+#     k3.markdown(f"""<div class="kpi-box"><div class="kpi-value">{len(files_for_sem)}</div>
+#         <div class="kpi-label">Subject Files</div></div>""", unsafe_allow_html=True)
+#     k4.markdown(f"""<div class="kpi-box"><div class="kpi-value">{total_rows}</div>
+#         <div class="kpi-label">Total Mark Rows</div></div>""", unsafe_allow_html=True)
+
+#     strength_locked = distinct_rolls < expected
+#     if strength_locked:
+#         st.markdown(
+#             f'<div class="banner banner-critical">🚨 Expected <b>{expected}</b> students '
+#             f'but found <b>{distinct_rolls}</b> distinct roll numbers. '
+#             f'Add the missing <b>{expected - distinct_rolls}</b> student(s) in the '
+#             f'file editors below before approving.</div>',
+#             unsafe_allow_html=True,
+#         )
+#     elif distinct_rolls == expected:
+#         st.markdown(
+#             '<div class="banner banner-success">✅ Student count matches expected '
+#             'strength perfectly.</div>',
+#             unsafe_allow_html=True,
+#         )
+#     else:
+#         st.markdown(
+#             f'<div class="banner banner-warning">⚠️ {distinct_rolls - expected} extra '
+#             f'student(s) vs expected — verify no duplicates.</div>',
+#             unsafe_allow_html=True,
+#         )
+#     st.markdown('</div>', unsafe_allow_html=True)
+
+#     # ── B · Historical Context (Semester 2+) ──────────────────────────────────
+#     if sn > 1:
+#         _show_historical_context(sn)
+
+#     # ── C · Per-File Validation + Editor ──────────────────────────────────────
+#     any_blocked = False
+
+#     for fname in files_for_sem:
+#         recs = file_records.get(fname, [])
+#         df   = file_dfs.get(fname, pd.DataFrame(columns=EDITOR_COLS))
+
+#         st.markdown(
+#             f'<div class="file-section">'
+#             f'<div class="file-section-header">📄 {fname}</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#         live_recs = df_to_records(df) if not df.empty else recs
+
+#         if not live_recs:
+#             st.warning(
+#                 f"No valid student rows found in **{fname}**. "
+#                 f"Check that rows 1–6 are metadata/header and that the parser "
+#                 f"correctly detected the column header row.",
+#                 icon="⚠️",
+#             )
+#             any_blocked = True
+#         elif _VALIDATOR_OK:
+#             try:
+#                 report = validate_records(live_recs, semester=sem)
+#                 if report.status == "BLOCKED":
+#                     any_blocked = True
+#                 _render_validation(report)
+#             except Exception as exc:
+#                 st.error(f"Validation engine error for {fname}: {exc}", icon="🚫")
+#                 any_blocked = True
+#         else:
+#             st.error(
+#                 "validation_agent could not be imported — fix the module error in the sidebar.",
+#                 icon="🚫",
+#             )
+#             any_blocked = True
+
+#         if not df.empty:
+#             key = f"editor_{_safe_key(sem)}_{_safe_key(fname)}"
+#             edited_df = st.data_editor(
+#                 df,
+#                 key                = key,
+#                 use_container_width= True,
+#                 num_rows           = "dynamic",
+#                 hide_index         = True,
+#                 column_config={
+#                     "student_name"  : st.column_config.TextColumn("Student Name", width="medium"),
+#                     "roll_no"       : st.column_config.TextColumn("Roll No",      width="medium"),
+#                     "father_name"   : st.column_config.TextColumn("Father Name",  width="medium"),
+#                     "subject_name"  : st.column_config.TextColumn("Subject",      width="medium"),
+#                     "total_marks"   : st.column_config.NumberColumn("Total",   min_value=0, format="%.1f", width="small"),
+#                     "obtained_marks": st.column_config.NumberColumn("Obtained",min_value=0, format="%.1f", width="small"),
+#                     "credit_hours"  : st.column_config.NumberColumn("Cr. Hrs", min_value=0, step=1, format="%d", width="small"),
+#                     "department"    : st.column_config.TextColumn("Dept",         width="small"),
+#                 },
+#             )
+#             st.session_state.sem_file_dfs[sem][fname] = edited_df
+#         else:
+#             st.info("Editor unavailable — file produced no parseable records.", icon="ℹ️")
+
+#         st.markdown('</div>', unsafe_allow_html=True)
+
+#     # ── D · Approve Button ─────────────────────────────────────────────────────
+#     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+#     can_approve = not any_blocked and not strength_locked
+
+#     b1, b2 = st.columns([3, 1])
+#     with b1:
+#         if not can_approve:
+#             reasons = []
+#             if any_blocked:     reasons.append("resolve all 🔴 BLOCKED errors")
+#             if strength_locked: reasons.append(f"add {expected - distinct_rolls} missing student(s)")
+#             st.markdown(
+#                 f'<div class="banner banner-info" style="margin:0">🔒 '
+#                 f'To unlock approval: <b>{"  &amp;  ".join(reasons)}</b></div>',
+#                 unsafe_allow_html=True,
+#             )
+#         else:
+#             st.markdown(
+#                 '<div class="banner banner-success" style="margin:0">'
+#                 '🔓 No blockers — ready to approve.</div>',
+#                 unsafe_allow_html=True,
+#             )
+#     with b2:
+#         if st.button(
+#             f"✅ Approve {sem}",
+#             type             = "primary",
+#             disabled         = not can_approve,
+#             use_container_width= True,
+#             key              = f"approve_{sem}",
+#         ):
+#             _approve_semester(sem)
+
+
+# def _approve_semester(sem: str) -> None:
+#     """
+#     Combine all per-file edited records for *sem* into sem_records[sem]
+#     (used by the calculator), then mark the semester as approved.
+#     """
+#     file_dfs = st.session_state.sem_file_dfs.get(sem, {})
+#     combined: list[dict] = []
+#     for df in file_dfs.values():
+#         combined.extend(df_to_records(df))
+#     st.session_state.sem_records[sem] = combined
+#     st.session_state.approvals[sem]   = True
+#     st.rerun()
+
+
+# def _render_validation(report: Any) -> None:
+#     status_map = {
+#         "CLEAN"  : ("banner-success", "✅ All records are clean."),
+#         "FLAGGED": ("banner-warning", "⚠️ Some records need review."),
+#         "BLOCKED": ("banner-critical","🚫 Critical issues must be fixed before approval."),
+#     }
+#     cls, msg = status_map.get(report.status, ("banner-info", ""))
+#     st.markdown(f"""
+#     <div class="banner {cls}">
+#         <div style="flex:1">{msg}</div>
+#         <div style="display:flex;gap:12px;font-size:.8rem">
+#             <span class="badge badge-clean">✓ {report.summary.clean} clean</span>
+#             <span class="badge badge-flagged">⚠ {report.summary.flagged} flagged</span>
+#             <span class="badge badge-blocked">✗ {report.summary.blocked} blocked</span>
+#         </div>
+#     </div>""", unsafe_allow_html=True)
+
+#     if not report.flagged_rows:
+#         return
+
+#     blocked = [r for r in report.flagged_rows if r.severity == "BLOCKED"]
+#     flagged = [r for r in report.flagged_rows if r.severity == "FLAGGED"]
+#     info    = [r for r in report.flagged_rows if r.severity == "INFO"]
+
+#     if blocked:
+#         with st.expander(f"🔴 BLOCKED Issues — {len(blocked)} (must fix)", expanded=True):
+#             for r in blocked:
+#                 st.error(
+#                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+#                     f"**{r.error_code}**: {r.error_message}", icon="🚫")
+#     if flagged:
+#         with st.expander(f"🟡 FLAGGED Warnings — {len(flagged)} (review recommended)"):
+#             for r in flagged:
+#                 st.warning(
+#                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+#                     f"**{r.error_code}**: {r.error_message}", icon="⚠️")
+#     if info:
+#         with st.expander(f"🔵 INFO Notes — {len(info)} (non-credit subjects)"):
+#             for r in info:
+#                 st.info(
+#                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
+#                     f"**{r.error_code}**: {r.error_message}", icon="ℹ️")
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # STAGE 3 — CALCULATE
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_calculate() -> None:
+#     st.markdown('<div class="stage-title">⚙️ Running GPA Calculation Engine</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         '<div class="stage-subtitle">'
+#         'Processing approved semesters <b>in order</b> (Semester 1 first). '
+#         'Each semester\'s SemesterGPA is saved to the DB before the next semester '
+#         'is processed — so CGPA at each step automatically includes all historical '
+#         'data (including records from previous upload sessions).</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     approved = sorted(
+#         [s for s in st.session_state.ordered_sems if st.session_state.approvals.get(s)],
+#         key=sem_num,
+#     )
+
+#     if not approved:
+#         st.error("No approved semesters. Return to review.", icon="🚫")
+#         if st.button("← Back to Review"):
+#             st.session_state.stage = "review"
+#             st.rerun()
+#         return
+
+#     total_recs = sum(len(st.session_state.sem_records.get(s, [])) for s in approved)
+#     c1, c2, c3 = st.columns(3)
+#     c1.metric("Approved Semesters", len(approved))
+#     c2.metric("Total Records",      total_recs)
+#     c3.metric("Processing Order",   " → ".join(f"Sem {sem_num(s)}" for s in approved))
+
+#     if not _CALC_OK:
+#         st.error("calculator_agent could not be imported. Fix import errors in sidebar.", icon="🚫")
+#         return
+
+#     agg: dict[str, Any] = {
+#         "marks_written": 0, "semester_gpas": [], "cgpas": [], "errors": [],
+#     }
+
+#     progress_bar = st.progress(0, text="Starting…")
+#     status_area  = st.empty()
+
+#     for step_i, sem in enumerate(approved):
+#         sn = sem_num(sem)
+#         ay = infer_academic_year(sn)
+
+#         status_area.markdown(
+#             f'<div class="banner banner-info">⚙️ Processing <b>{sem}</b> '
+#             f'(academic year {ay})…</div>',
+#             unsafe_allow_html=True,
+#         )
+
+#         sem_recs: list[dict] = []
+#         for rec in st.session_state.sem_records.get(sem, []):
+#             e = dict(rec)
+#             e["semester"]      = sn
+#             e["academic_year"] = ay
+#             sem_recs.append(e)
+
+#         if not sem_recs:
+#             st.warning(f"No records found for {sem} — skipping.", icon="⚠️")
+#             progress_bar.progress((step_i + 1) / len(approved))
+#             continue
+
+#         try:
+#             out = calculator_agent_node({
+#                 "validated_records": sem_recs,
+#                 "semester"         : sn,
+#                 "academic_year"    : ay,
+#                 "db_url"           : st.session_state.db_url,
+#                 "approved_by"      : "HOD",
+#                 "source_file"      : "dashboard_upload",
+#                 "errors"           : [],
+#             })
+#             agg["marks_written"] += out.get("marks_written", 0)
+#             agg["semester_gpas"].extend(out.get("semester_gpas", []))
+#             for new_cgpa in out.get("cgpas", []):
+#                 agg["cgpas"] = [
+#                     c for c in agg["cgpas"]
+#                     if c["student_id"] != new_cgpa["student_id"]
+#                 ]
+#                 agg["cgpas"].append(new_cgpa)
+#             agg["errors"].extend(out.get("errors", []))
+#         except Exception as exc:
+#             st.error(f"Error calculating {sem}: {exc}", icon="🚫")
+#             agg["errors"].append({"roll_no": None, "reason": f"{sem}: {exc}"})
+
+#         progress_bar.progress((step_i + 1) / len(approved))
+
+#     status_area.markdown(
+#         '<div class="banner banner-success">✅ All semesters processed successfully.</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     st.session_state.calc_results = agg
+#     st.session_state.stage        = "results"
+#     st.rerun()
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # STAGE 4 — RESULTS
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def render_results() -> None:
+#     st.markdown('<div class="stage-title">📊 GPA Results & Final Approval</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         '<div class="stage-subtitle">Review the per-subject GPA breakdown and the '
+#         'progressive CGPA table before committing to the database.</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     res           = st.session_state.calc_results or {}
+#     marks_written = res.get("marks_written", 0)
+#     sem_gpas      = res.get("semester_gpas", [])
+#     cgpas         = res.get("cgpas", [])
+#     errors        = res.get("errors", [])
+
+#     m1, m2, m3, m4 = st.columns(4)
+#     m1.metric("Records Written", marks_written)
+#     m2.metric("Semester GPAs",   len(sem_gpas))
+#     m3.metric("Students (CGPA)", len(cgpas))
+#     m4.metric("Errors",          len(errors),
+#               delta=f"{len(errors)} errors" if errors else None,
+#               delta_color="inverse" if errors else "off")
+
+#     if errors:
+#         with st.expander(f"⚠️ Calculation Errors ({len(errors)})", expanded=True):
+#             for e in errors:
+#                 st.error(f"`{e.get('roll_no','N/A')}` — {e.get('reason','unknown')}", icon="🚫")
+
+#     # ── Per-Subject GPA Breakdown ──────────────────────────────────────────────
+#     st.markdown('<div class="card">', unsafe_allow_html=True)
+#     st.markdown('<div class="section-label">Per-Subject GPA Breakdown</div>',
+#                 unsafe_allow_html=True)
+
+#     subj_df = _build_subject_gpa_df()
+#     if not subj_df.empty:
+#         st.dataframe(
+#             subj_df,
+#             use_container_width=True,
+#             hide_index=True,
+#             column_config={
+#                 "GPA": st.column_config.NumberColumn("Grade Point", format="%.2f"),
+#                 "%":   st.column_config.NumberColumn("Percentage",  format="%.1f%%"),
+#             },
+#         )
+#         buf_subj = io.StringIO()
+#         subj_df.to_csv(buf_subj, index=False)
+#         st.download_button(
+#             "⬇ Download Per-Subject Report (CSV)",
+#             data=buf_subj.getvalue(),
+#             file_name=f"subject_gpa_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+#             mime="text/csv",
+#         )
+#     else:
+#         st.info("No subject-level data found in the database for the processed semesters.", icon="ℹ️")
+
+#     st.markdown('</div>', unsafe_allow_html=True)
+
+#     # ── Progressive GPA Table ──────────────────────────────────────────────────
+#     st.markdown('<div class="card">', unsafe_allow_html=True)
+#     st.markdown('<div class="section-label">Progressive Semester GPA & Cumulative CGPA</div>',
+#                 unsafe_allow_html=True)
+#     st.markdown(
+#         '<div style="font-size:.8rem;color:#64748B;margin-bottom:14px">'
+#         'CGPA = Σ Quality Points ÷ Σ Credit Hours (HEC Pakistan standard — '
+#         'never an average of GPA values). Includes all historical semesters from DB.</div>',
+#         unsafe_allow_html=True,
+#     )
+
+#     approved_sems = [s for s in st.session_state.ordered_sems
+#                      if st.session_state.approvals.get(s)]
+#     prog_html = _build_progressive_html(approved_sems)
+#     st.markdown(prog_html, unsafe_allow_html=True)
+
+#     prog_df = _build_progressive_df_for_export(approved_sems)
+#     if not prog_df.empty:
+#         buf = io.StringIO()
+#         prog_df.to_csv(buf, index=False)
+#         st.download_button(
+#             "⬇ Download Progressive GPA Report (CSV)",
+#             data      = buf.getvalue(),
+#             file_name = f"gpa_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+#             mime      = "text/csv",
+#         )
+#     st.markdown('</div>', unsafe_allow_html=True)
+
+#     # ── Final Decision ─────────────────────────────────────────────────────────
+#     st.markdown('<div class="card">', unsafe_allow_html=True)
+#     st.markdown('<div class="section-label">Final Decision</div>', unsafe_allow_html=True)
+
+#     if st.session_state.final_saved:
+#         st.markdown(
+#             '<div class="banner banner-success">💾 Results approved and permanently '
+#             'saved to the database. HOD sign-off recorded.</div>',
+#             unsafe_allow_html=True,
+#         )
+#         if st.button("🔄 Start New Batch", use_container_width=True):
+#             _reset()
+#             st.rerun()
+#         st.markdown('</div>', unsafe_allow_html=True)
+#         return
+
+#     col_save, col_reject = st.columns(2)
+#     with col_save:
+#         if st.button("💾 Approve & Save Permanently to Database",
+#                      type="primary", use_container_width=True):
+#             st.session_state.final_saved = True
+#             st.success("✅ HOD approval recorded. Results saved.", icon="✅")
+#             st.rerun()
+#     with col_reject:
+#         if st.button("🛑 Report Error / Reject Results",
+#                      type="secondary", use_container_width=True):
+#             st.session_state.calc_results = None
+#             st.session_state.approvals    = {}
+#             st.session_state.stage        = "review"
+#             st.warning("Results rejected. Re-review all semesters.", icon="⚠️")
+#             st.rerun()
+#     st.markdown('</div>', unsafe_allow_html=True)
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # RESULT BUILDERS
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def _build_subject_gpa_df() -> pd.DataFrame:
+#     if not _CALC_OK:
+#         return pd.DataFrame()
+#     try:
+#         engine = get_engine(st.session_state.db_url)
+#         with Session(engine) as sess:
+#             marks_list   = sess.execute(sa_select(Mark)).scalars().all()
+#             students_map = {s.id: s for s in sess.execute(sa_select(Student)).scalars().all()}
+#             subjects_map = {s.id: s for s in sess.execute(sa_select(Subject)).scalars().all()}
+
+#         rows = []
+#         for m in marks_list:
+#             stu = students_map.get(m.student_id)
+#             sub = subjects_map.get(m.subject_id)
+#             if not stu or not sub:
+#                 continue
+#             rows.append({
+#                 "Roll No"     : stu.roll_no,
+#                 "Student Name": stu.student_name,
+#                 "Semester"    : m.semester,
+#                 "Subject"     : sub.subject_name,
+#                 "Cr. Hrs"     : sub.credit_hours,
+#                 "Obtained"    : m.obtained_marks,
+#                 "Total"       : m.total_marks,
+#                 "%"           : round(m.percentage, 1),
+#                 "GPA"         : m.grade_point,
+#                 "Quality Pts" : m.quality_points,
+#             })
+
+#         if not rows:
+#             return pd.DataFrame()
+
+#         df = pd.DataFrame(rows)
+#         df.sort_values(["Semester", "Roll No", "Subject"], inplace=True)
+#         df.reset_index(drop=True, inplace=True)
+#         return df
+
+#     except Exception:
+#         return pd.DataFrame()
+
+
+# def _build_progressive_html(approved_sems: list[str]) -> str:
+#     def _gpa_cell(val: float | None) -> str:
+#         if val is None:
+#             return '<td class="gpa-dash">—</td>'
+#         cls = ("gpa-high" if val >= 3.50 else "gpa-mid" if val >= 2.50 else "gpa-low")
+#         return f'<td class="{cls}">{val:.2f}</td>'
+
+#     rows_data: list[dict] = []
+#     try:
+#         if _CALC_OK:
+#             engine = get_engine(st.session_state.db_url)
+#             with Session(engine) as sess:
+#                 students  = sess.execute(sa_select(Student)).scalars().all()
+#                 all_sgpas = sess.execute(sa_select(SemesterGPA)).scalars().all()
+#                 all_cgpas = sess.execute(sa_select(CGPA)).scalars().all()
+
+#             sgpa_map: dict[int, dict[int, Any]] = {}
+#             for sg in all_sgpas:
+#                 sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
+#             cgpa_map = {c.student_id: c for c in all_cgpas}
+
+#             all_sem_nums = sorted({sg.semester for sg in all_sgpas})
+#             if not all_sem_nums:
+#                 all_sem_nums = sorted(sem_num(s) for s in approved_sems)
+
+#             for stu in students:
+#                 row: dict = {"name": stu.student_name, "roll": stu.roll_no,
+#                              "dept": stu.department or ""}
+#                 running_qp = running_ch = 0.0
+#                 for sn in all_sem_nums:
+#                     sg = sgpa_map.get(stu.id, {}).get(sn)
+#                     row[f"gpa_{sn}"] = sg.gpa if sg else None
+#                     if sg:
+#                         running_ch += sg.total_credit_hours or 0
+#                         running_qp += sg.total_quality_points or 0
+#                     row[f"cgpa_{sn}"] = (round(running_qp / running_ch, 2)
+#                                          if running_ch > 0 else None)
+#                 final = cgpa_map.get(stu.id)
+#                 row["final_cgpa"] = final.cgpa if final else None
+#                 row["_sem_nums"]  = all_sem_nums
+#                 rows_data.append(row)
+#     except Exception:
+#         all_sem_nums = sorted(sem_num(s) for s in approved_sems)
+#         res = st.session_state.calc_results or {}
+#         sgpa_mem: dict[int, dict[int, dict]] = {}
+#         for sg in res.get("semester_gpas", []):
+#             sgpa_mem.setdefault(sg["student_id"], {})[sg["semester"]] = sg
+#         cgpa_mem = {c["student_id"]: c for c in res.get("cgpas", [])}
+#         for sid in sorted(sgpa_mem):
+#             row = {"name": f"Student {sid}", "roll": "—", "dept": ""}
+#             rqp = rch = 0.0
+#             for sn in all_sem_nums:
+#                 sg  = sgpa_mem.get(sid, {}).get(sn, {})
+#                 gpa = sg.get("gpa")
+#                 row[f"gpa_{sn}"]  = gpa
+#                 rch += sg.get("total_credit_hours", 0) or 0
+#                 rqp += sg.get("total_quality_points", 0) or 0
+#                 row[f"cgpa_{sn}"] = round(rqp / rch, 2) if rch > 0 else None
+#             fc = cgpa_mem.get(sid, {})
+#             row["final_cgpa"] = fc.get("cgpa")
+#             row["_sem_nums"]  = all_sem_nums
+#             rows_data.append(row)
+
+#     if not rows_data:
+#         return '<div class="banner banner-warning">No student data found in the database.</div>'
+
+#     sem_nums = rows_data[0].get("_sem_nums", [])
+
+#     th = "<tr><th>Student Name</th><th>Roll No</th><th>Dept</th>"
+#     for sn in sem_nums:
+#         th += f"<th>Sem {sn} GPA</th><th>CGPA (1–{sn})</th>"
+#     th += "<th>Final CGPA</th></tr>"
+
+#     body = ""
+#     for r in rows_data:
+#         body += (f'<tr><td class="name-col">{r["name"]}</td>'
+#                  f'<td class="roll-col">{r["roll"]}</td>'
+#                  f'<td class="roll-col">{r["dept"]}</td>')
+#         for sn in sem_nums:
+#             body += _gpa_cell(r.get(f"gpa_{sn}"))
+#             body += _gpa_cell(r.get(f"cgpa_{sn}"))
+#         body += _gpa_cell(r.get("final_cgpa"))
+#         body += "</tr>"
+
+#     return (
+#         f'<div style="overflow-x:auto">'
+#         f'<table class="gpa-table"><thead>{th}</thead><tbody>{body}</tbody></table>'
+#         f'</div>'
+#         f'<div style="margin-top:10px;font-size:.75rem;color:#94A3B8">'
+#         f'🟢 ≥ 3.50 Excellent &nbsp;|&nbsp; '
+#         f'🟡 2.50 – 3.49 Good &nbsp;|&nbsp; '
+#         f'🔴 &lt; 2.50 At Risk</div>'
+#     )
+
+
+# def _build_progressive_df_for_export(approved_sems: list[str]) -> pd.DataFrame:
+#     if not _CALC_OK:
+#         return pd.DataFrame()
+#     try:
+#         engine = get_engine(st.session_state.db_url)
+#         with Session(engine) as sess:
+#             students  = sess.execute(sa_select(Student)).scalars().all()
+#             all_sgpas = sess.execute(sa_select(SemesterGPA)).scalars().all()
+#             all_cgpas = sess.execute(sa_select(CGPA)).scalars().all()
+
+#         sgpa_map: dict[int, dict[int, Any]] = {}
+#         for sg in all_sgpas:
+#             sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
+#         cgpa_map = {c.student_id: c for c in all_cgpas}
+
+#         all_sem_nums = sorted({sg.semester for sg in all_sgpas}
+#                               or {sem_num(s) for s in approved_sems})
+
+#         rows = []
+#         for stu in students:
+#             row = {"Student Name": stu.student_name, "Roll No": stu.roll_no,
+#                    "Department": stu.department or ""}
+#             rqp = rch = 0.0
+#             for sn in all_sem_nums:
+#                 sg = sgpa_map.get(stu.id, {}).get(sn)
+#                 row[f"Sem {sn} GPA"] = f"{sg.gpa:.2f}" if (sg and sg.gpa) else "—"
+#                 if sg:
+#                     rch += sg.total_credit_hours or 0
+#                     rqp += sg.total_quality_points or 0
+#                 row[f"CGPA (1–{sn})"] = f"{rqp/rch:.2f}" if rch > 0 else "—"
+#             fc = cgpa_map.get(stu.id)
+#             row["Final CGPA"] = f"{fc.cgpa:.2f}" if (fc and fc.cgpa) else "—"
+#             rows.append(row)
+
+#         return pd.DataFrame(rows) if rows else pd.DataFrame()
+#     except Exception:
+#         return pd.DataFrame()
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # FALLBACK PARSER  (when parser_agent cannot be imported)
+# # ──────────────────────────────────────────────────────────────────────────────
+# _FALIAS: dict[str, list[str]] = {
+#     "student_name"  : ["student name","name","student","sname"],
+#     "roll_no"       : ["roll no","roll number","rollno","reg no","registration no"],
+#     "father_name"   : ["father name","father's name","fname"],
+#     "subject_name"  : ["subject name","subject","course name","course"],
+#     "total_marks"   : ["total marks","total","max marks","maximum marks","full marks"],
+#     "obtained_marks": ["obtained marks","obtained","marks","marks obtained","scored"],
+#     "credit_hours"  : ["credit hours","credits","ch","credit_hours"],
+#     "department"    : ["department","dept","program"],
+# }
+# _FOOTER_KWS_FB = frozenset({
+#     "signature","teacher","head","principal","controller",
+#     "examiner","lecturer","dean","chairman","coordinator",
+#     "prepared by","checked by","approved by","seal",
+# })
+
+
+# def _fallback_parse(file_bytes: bytes, filename: str,
+#                     subject_hint: str | None) -> dict[str, Any]:
+#     import io as _io
+#     ext = Path(filename).suffix.lower()
+#     buf = _io.BytesIO(file_bytes)
+#     try:
+#         df_raw = (pd.read_csv(buf, header=None, dtype=str)
+#                   if ext == ".csv"
+#                   else pd.read_excel(buf, header=None, dtype=str, engine="openpyxl"))
+#     except Exception as exc:
+#         return {"file_name": filename, "status": "ERROR", "records": [], "warnings": [str(exc)]}
+
+#     alias_words = {w for a_list in _FALIAS.values() for a in a_list for w in a.split()}
+#     best, score = 0, -1
+#     for i in range(min(25, len(df_raw))):
+#         words = {w for v in df_raw.iloc[i].values if pd.notna(v)
+#                  for w in str(v).strip().lower().split()}
+#         s = len(words & alias_words)
+#         if s > score:
+#             score, best = s, i
+#     if score < 2:
+#         best = 0
+
+#     buf = _io.BytesIO(file_bytes)
+#     try:
+#         df = (pd.read_csv(buf, header=best, dtype=str)
+#               if ext == ".csv"
+#               else pd.read_excel(buf, header=best, dtype=str, engine="openpyxl"))
+#     except Exception:
+#         return {"file_name": filename, "status": "ERROR", "records": [], "warnings": []}
+
+#     df.dropna(how="all", inplace=True)
+#     end_idx = len(df)
+#     for i in range(len(df) - 1, -1, -1):
+#         row = df.iloc[i]
+#         nn = [str(v).strip() for v in row.values
+#               if pd.notna(v) and str(v).strip().lower() not in ("","nan","none")]
+#         if not nn:
+#             end_idx = i; continue
+#         if any(kw in " ".join(v.lower() for v in nn) for kw in _FOOTER_KWS_FB):
+#             end_idx = i; continue
+#         break
+#     df = df.iloc[:end_idx].reset_index(drop=True)
+
+#     n2raw = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
+#     cm: dict[str, str] = {}
+#     for field, aliases in _FALIAS.items():
+#         for a in aliases:
+#             if a in n2raw:
+#                 cm[field] = n2raw[a]; break
+
+#     records: list[dict] = []
+#     for _, row in df.iterrows():
+#         rec: dict = {"has_issues": False, "parse_warnings": [],
+#                      "subject_name": subject_hint}
+#         all_null = True
+#         for field, col in cm.items():
+#             raw = row.get(col)
+#             if pd.isna(raw) or str(raw).strip() in ("", "nan"):
+#                 continue
+#             all_null = False
+#             val = str(raw).strip()
+#             if field in ("total_marks","obtained_marks"):
+#                 try:    rec[field] = float(val)
+#                 except: rec[field] = val; rec["has_issues"] = True
+#             elif field == "credit_hours":
+#                 try:    rec[field] = int(float(val))
+#                 except: rec[field] = val; rec["has_issues"] = True
+#             else:
+#                 rec[field] = val
+#         if not all_null:
+#             records.append(rec)
+#     return {"file_name": filename,
+#             "status": "OK" if records else "ERROR",
+#             "records": records, "warnings": []}
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # RESET
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def _reset() -> None:
+#     for k in [
+#         "stage", "raw_files", "file_assignments", "file_subjects",
+#         "detection_source",
+#         "semester_groups", "sem_file_records", "sem_file_dfs",
+#         "sem_records", "approvals", "val_reports",
+#         "ordered_sems", "calc_results", "final_saved", "invalid_files",
+#     ]:
+#         st.session_state.pop(k, None)
+
+
+# # ──────────────────────────────────────────────────────────────────────────────
+# # MAIN
+# # ──────────────────────────────────────────────────────────────────────────────
+
+# def main() -> None:
+#     _init()
+#     render_sidebar()
+
+#     stage = st.session_state.stage
+#     if   stage == "upload"    : render_upload()
+#     elif stage == "assign"    : render_assign()
+#     elif stage == "review"    : render_review()
+#     elif stage == "calculate" : render_calculate()
+#     elif stage == "results"   : render_results()
+#     else:
+#         st.error(f"Unknown stage '{stage}'.")
+#         if st.button("🔄 Reset"):
+#             _reset()
+#             st.rerun()
+
+
+# if __name__ == "__main__":
+#     main()
+
 """
 src/dashboard/app.py
 ====================
 University of Loralai — CS Department
 Enterprise HITL GPA Calculation Dashboard  |  Tech Lead: Arif Khan
 
-Zero filename dependency: upload any .xlsx / .csv file.
-The system auto-detects semester from the filename and lets the HOD
-confirm or override every assignment before processing begins.
+File-name-independent: any .xlsx / .csv filename is accepted.
+Semester and subject are auto-detected from the first 15 rows of file
+content (university metadata header rows).  Three formats are handled:
+  A) Colon-in-cell  : "Semester: 3"  /  "Subject: Operating Systems"
+  B) Two-cell pair  : | Semester | 3 |  /  | Subject | OS |
+  C) Free-text cell : "3rd Semester — Data Structures"
+If auto-detection fails the user assigns semester manually via dropdown
+on the Review Assignments step (every file MUST have a semester before
+the pipeline can proceed).
+
+Per-file validation prevents false duplicate-roll-no alerts when multiple
+subject files belong to the same semester.
+
+Semester tabs give simultaneous access to all semesters under review.
+
+Historical CGPA: when processing Semester 2 (or later), the calculator
+automatically reads historical SemesterGPA rows already in the DB — no
+need to re-upload previous semester data.
 
 Run from project root:
     streamlit run src/dashboard/app.py
@@ -29,7 +3502,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── Path: ensure project root is resolvable ──────────────────────────────────
-_ROOT = Path(__file__).resolve().parent.parent.parent   # project root
+_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -40,6 +3513,7 @@ try:
     from src.agents.parser_agent import (
         detect_semester_and_subject,
         parse_file_to_records,
+        _prettify_subject,          # reused for subject name formatting
     )
     _PARSER_OK = True
 except Exception as _e:
@@ -55,7 +3529,7 @@ except Exception as _e:
 
 try:
     from src.agents.calculator_agent import calculator_agent_node, get_engine
-    from src.models.database_models import Student, SemesterGPA, CGPA
+    from src.models.database_models import Student, Subject, Mark, SemesterGPA, CGPA
     from sqlalchemy.orm import Session
     from sqlalchemy import select as sa_select
     _CALC_OK = True
@@ -74,222 +3548,96 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ENTERPRISE DESIGN SYSTEM  (injected once)
+# ENTERPRISE DESIGN SYSTEM
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* ── Global ─────────────────────────────────────────────────────────── */
 html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
 .stApp { background-color: #EEF2F7; }
-
-/* ── Sidebar ─────────────────────────────────────────────────────────── */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0B1E3D 0%, #122B52 60%, #0F2444 100%);
     border-right: 1px solid #1E3A6E;
 }
 section[data-testid="stSidebar"] * { color: #CBD5E1 !important; }
-section[data-testid="stSidebar"] .sidebar-title {
-    color: #F1F5F9 !important; font-size: 1.05rem; font-weight: 700;
-}
+section[data-testid="stSidebar"] .sidebar-title { color:#F1F5F9!important;font-size:1.05rem;font-weight:700; }
 section[data-testid="stSidebar"] hr { border-color: #1E3A6E !important; }
-
-/* ── Cards ────────────────────────────────────────────────────────────── */
-.card {
-    background: #FFFFFF;
-    border-radius: 12px;
-    padding: 24px 28px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.07), 0 4px 16px rgba(0,0,0,0.04);
-    border: 1px solid #E2E8F0;
-    margin-bottom: 18px;
-}
-.card-sm {
-    background: #FFFFFF;
-    border-radius: 10px;
-    padding: 16px 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-    border: 1px solid #E2E8F0;
-    margin-bottom: 12px;
-}
-
-/* ── Stage header ─────────────────────────────────────────────────────── */
-.stage-title {
-    font-size: 1.55rem;
-    font-weight: 800;
-    color: #0F2444;
-    letter-spacing: -0.5px;
-    margin-bottom: 4px;
-}
-.stage-subtitle {
-    font-size: 0.9rem;
-    color: #64748B;
-    margin-bottom: 24px;
-    font-weight: 400;
-}
-
-/* ── Section labels ──────────────────────────────────────────────────── */
-.section-label {
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-    text-transform: uppercase;
-    color: #94A3B8;
-    margin-bottom: 8px;
-}
-
-/* ── Severity banners ─────────────────────────────────────────────────── */
-.banner {
-    border-radius: 8px;
-    padding: 12px 18px;
-    font-weight: 600;
-    font-size: 0.9rem;
-    margin: 10px 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    line-height: 1.5;
-}
-.banner-critical {
-    background: linear-gradient(135deg, #FEF2F2, #FEE2E2);
-    border: 1px solid #FECACA;
-    border-left: 4px solid #DC2626;
-    color: #7F1D1D;
-}
-.banner-warning {
-    background: linear-gradient(135deg, #FFFBEB, #FEF3C7);
-    border: 1px solid #FDE68A;
-    border-left: 4px solid #D97706;
-    color: #78350F;
-}
-.banner-success {
-    background: linear-gradient(135deg, #F0FDF4, #DCFCE7);
-    border: 1px solid #BBF7D0;
-    border-left: 4px solid #16A34A;
-    color: #14532D;
-}
-.banner-info {
-    background: linear-gradient(135deg, #EFF6FF, #DBEAFE);
-    border: 1px solid #BFDBFE;
-    border-left: 4px solid #2563EB;
-    color: #1E3A8A;
-}
-
-/* ── Status badges ────────────────────────────────────────────────────── */
-.badge {
-    display: inline-block;
-    border-radius: 20px;
-    padding: 2px 10px;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.3px;
-    vertical-align: middle;
-}
-.badge-blocked { background:#FEE2E2; color:#B91C1C; border:1px solid #FECACA; }
-.badge-flagged { background:#FEF3C7; color:#B45309; border:1px solid #FDE68A; }
-.badge-clean   { background:#DCFCE7; color:#15803D; border:1px solid #BBF7D0; }
-.badge-info    { background:#DBEAFE; color:#1D4ED8; border:1px solid #BFDBFE; }
-
-/* ── Semester progress timeline ───────────────────────────────────────── */
-.timeline { display:flex; align-items:center; gap:0; margin-bottom:28px; flex-wrap:wrap; }
-.tl-step {
-    display:flex; align-items:center; gap:6px;
-    padding:6px 12px; border-radius:20px;
-    font-size:0.78rem; font-weight:600;
-    white-space:nowrap;
-}
-.tl-done    { background:#DCFCE7; color:#166534; }
-.tl-active  { background:#1D4ED8; color:#FFFFFF; box-shadow:0 0 0 3px #BFDBFE; }
-.tl-pending { background:#F1F5F9; color:#94A3B8; }
-.tl-arrow   { color:#CBD5E1; font-size:0.75rem; padding:0 4px; }
-
-/* ── KPI metric box ───────────────────────────────────────────────────── */
-.kpi-box {
-    background:#FFFFFF; border-radius:12px;
-    padding:20px 24px; text-align:center;
-    box-shadow:0 1px 4px rgba(0,0,0,0.06);
-    border:1px solid #E2E8F0;
-}
-.kpi-value  { font-size:2.2rem; font-weight:800; color:#0F2444; line-height:1.1; }
-.kpi-label  { font-size:0.78rem; font-weight:600; color:#64748B;
-              text-transform:uppercase; letter-spacing:0.8px; margin-top:6px; }
-.kpi-delta-pos { color:#16A34A; font-size:0.8rem; font-weight:600; }
-.kpi-delta-neg { color:#DC2626; font-size:0.8rem; font-weight:600; }
-
-/* ── File chip ────────────────────────────────────────────────────────── */
-.file-chip {
-    display:inline-flex; align-items:center; gap:6px;
-    background:#F8FAFC; border:1px solid #E2E8F0;
-    border-radius:8px; padding:6px 12px;
-    font-size:0.8rem; color:#374151; margin:3px;
-}
-
-/* ── Table styling ────────────────────────────────────────────────────── */
-.gpa-table {
-    width:100%; border-collapse:collapse;
-    font-size:0.85rem;
-}
-.gpa-table th {
-    background:#0F2444; color:#F1F5F9;
-    padding:10px 14px; text-align:center;
-    font-weight:600; font-size:0.75rem;
-    letter-spacing:0.5px; white-space:nowrap;
-}
-.gpa-table td {
-    padding:9px 14px; text-align:center;
-    border-bottom:1px solid #F1F5F9;
-    color:#374151;
-}
+.card { background:#FFFFFF;border-radius:12px;padding:24px 28px;
+        box-shadow:0 1px 4px rgba(0,0,0,.07),0 4px 16px rgba(0,0,0,.04);
+        border:1px solid #E2E8F0;margin-bottom:18px; }
+.card-sm { background:#FFFFFF;border-radius:10px;padding:16px 20px;
+           box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid #E2E8F0;margin-bottom:12px; }
+.stage-title  { font-size:1.55rem;font-weight:800;color:#0F2444;letter-spacing:-.5px;margin-bottom:4px; }
+.stage-subtitle { font-size:.9rem;color:#64748B;margin-bottom:24px;font-weight:400; }
+.section-label { font-size:.7rem;font-weight:700;letter-spacing:1.2px;
+                 text-transform:uppercase;color:#94A3B8;margin-bottom:8px; }
+.banner { border-radius:8px;padding:12px 18px;font-weight:600;font-size:.9rem;
+          margin:10px 0;display:flex;align-items:center;gap:10px;line-height:1.5; }
+.banner-critical { background:linear-gradient(135deg,#FEF2F2,#FEE2E2);border:1px solid #FECACA;
+                   border-left:4px solid #DC2626;color:#7F1D1D; }
+.banner-warning  { background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border:1px solid #FDE68A;
+                   border-left:4px solid #D97706;color:#78350F; }
+.banner-success  { background:linear-gradient(135deg,#F0FDF4,#DCFCE7);border:1px solid #BBF7D0;
+                   border-left:4px solid #16A34A;color:#14532D; }
+.banner-info     { background:linear-gradient(135deg,#EFF6FF,#DBEAFE);border:1px solid #BFDBFE;
+                   border-left:4px solid #2563EB;color:#1E3A8A; }
+.badge { display:inline-block;border-radius:20px;padding:2px 10px;
+         font-size:.72rem;font-weight:700;letter-spacing:.3px;vertical-align:middle; }
+.badge-blocked { background:#FEE2E2;color:#B91C1C;border:1px solid #FECACA; }
+.badge-flagged { background:#FEF3C7;color:#B45309;border:1px solid #FDE68A; }
+.badge-clean   { background:#DCFCE7;color:#15803D;border:1px solid #BBF7D0; }
+.badge-info    { background:#DBEAFE;color:#1D4ED8;border:1px solid #BFDBFE; }
+.kpi-box { background:#FFFFFF;border-radius:12px;padding:20px 24px;text-align:center;
+           box-shadow:0 1px 4px rgba(0,0,0,.06);border:1px solid #E2E8F0; }
+.kpi-value { font-size:2.2rem;font-weight:800;color:#0F2444;line-height:1.1; }
+.kpi-label { font-size:.78rem;font-weight:600;color:#64748B;
+             text-transform:uppercase;letter-spacing:.8px;margin-top:6px; }
+.file-chip { display:inline-flex;align-items:center;gap:6px;background:#F8FAFC;
+             border:1px solid #E2E8F0;border-radius:8px;padding:6px 12px;
+             font-size:.8rem;color:#374151;margin:3px; }
+.gpa-table { width:100%;border-collapse:collapse;font-size:.85rem; }
+.gpa-table th { background:#0F2444;color:#F1F5F9;padding:10px 14px;text-align:center;
+                font-weight:600;font-size:.75rem;letter-spacing:.5px;white-space:nowrap; }
+.gpa-table td { padding:9px 14px;text-align:center;border-bottom:1px solid #F1F5F9;color:#374151; }
 .gpa-table tr:hover td { background:#F8FAFC; }
-.gpa-table td.name-col { text-align:left; font-weight:600; color:#0F2444; }
-.gpa-table td.roll-col { text-align:left; color:#64748B; font-size:0.8rem; }
-.gpa-high { background:#DCFCE7 !important; color:#166534; font-weight:700; border-radius:6px; }
-.gpa-mid  { background:#FEF3C7 !important; color:#92400E; font-weight:600; border-radius:6px; }
-.gpa-low  { background:#FEE2E2 !important; color:#991B1B; font-weight:600; border-radius:6px; }
+.gpa-table td.name-col { text-align:left;font-weight:600;color:#0F2444; }
+.gpa-table td.roll-col { text-align:left;color:#64748B;font-size:.8rem; }
+.gpa-high { background:#DCFCE7!important;color:#166534;font-weight:700;border-radius:6px; }
+.gpa-mid  { background:#FEF3C7!important;color:#92400E;font-weight:600;border-radius:6px; }
+.gpa-low  { background:#FEE2E2!important;color:#991B1B;font-weight:600;border-radius:6px; }
 .gpa-dash { color:#CBD5E1; }
-
-/* ── Sidebar steps ────────────────────────────────────────────────────── */
-.sb-step { padding:6px 0; font-size:0.85rem; display:flex; align-items:center; gap:8px; }
-.sb-done { color:#4ADE80 !important; }
-.sb-active { color:#60A5FA !important; font-weight:700 !important; }
-.sb-pending { color:#475569 !important; }
-.sb-sem { font-size:0.8rem; display:flex; align-items:center;
-          gap:6px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,0.07); }
-
-/* ── Upload dropzone ──────────────────────────────────────────────────── */
-.upload-zone {
-    border: 2px dashed #CBD5E1; border-radius:12px;
-    padding:40px; text-align:center;
-    background:#F8FAFC; margin-bottom:16px;
-}
-.upload-zone h3 { color:#0F2444; margin:0 0 8px 0; font-size:1.1rem; }
-.upload-zone p  { color:#64748B; margin:0; font-size:0.88rem; }
-
-/* ── Divider ──────────────────────────────────────────────────────────── */
-.divider {
-    border:none; border-top:1px solid #E2E8F0; margin:20px 0;
-}
-
-/* Remove Streamlit default padding on some elements */
-.block-container { padding-top: 2rem !important; }
+.sb-step   { padding:6px 0;font-size:.85rem;display:flex;align-items:center;gap:8px; }
+.sb-done   { color:#4ADE80!important; }
+.sb-active { color:#60A5FA!important;font-weight:700!important; }
+.sb-pending{ color:#475569!important; }
+.sb-sem    { font-size:.8rem;display:flex;align-items:center;gap:6px;padding:4px 0;
+             border-bottom:1px solid rgba(255,255,255,.07); }
+.upload-zone { border:2px dashed #CBD5E1;border-radius:12px;padding:40px;
+               text-align:center;background:#F8FAFC;margin-bottom:16px; }
+.upload-zone h3 { color:#0F2444;margin:0 0 8px 0;font-size:1.1rem; }
+.upload-zone p  { color:#64748B;margin:0;font-size:.88rem; }
+.divider { border:none;border-top:1px solid #E2E8F0;margin:20px 0; }
+.block-container { padding-top:2rem!important; }
+/* Per-file section separator */
+.file-section { border:1px solid #E2E8F0;border-radius:10px;padding:16px 20px;
+                margin-bottom:14px;background:#FAFBFC; }
+.file-section-header { font-size:.82rem;font-weight:700;color:#0F2444;
+                       display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+/* Historical banner */
+.hist-banner { background:linear-gradient(135deg,#F0F9FF,#E0F2FE);border:1px solid #BAE6FD;
+               border-left:4px solid #0284C7;border-radius:8px;padding:12px 18px;
+               margin:10px 0;color:#0C4A6E; }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────────────────────
 
 EXPECTED_STRENGTH: dict[str, int] = {
-    "Semester 1": 20,
-    "Semester 2": 20,
-    "Semester 3": 20,
-    "Semester 4": 19,
-    "Semester 5": 18,
-    "Semester 6": 18,
-    "Semester 7": 18,
-    "Semester 8": 18,
+    "Semester 1": 20, "Semester 2": 20, "Semester 3": 20, "Semester 4": 19,
+    "Semester 5": 18, "Semester 6": 18, "Semester 7": 18, "Semester 8": 18,
 }
 ALL_SEMESTERS = list(EXPECTED_STRENGTH.keys())
-SEM_OPTIONS   = ["— Unassigned —"] + ALL_SEMESTERS
 DEFAULT_DB    = os.getenv("DATABASE_URL", "sqlite:///./gpa_system.db")
 
 EDITOR_COLS = [
@@ -297,6 +3645,255 @@ EDITOR_COLS = [
     "subject_name", "total_marks", "obtained_marks",
     "credit_hours", "department",
 ]
+
+# Semester dropdown options used in the Assign stage
+_SEM_OPTIONS: list[str] = ["(Select Semester…)"] + [f"Semester {n}" for n in range(1, 9)]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONTENT-BASED SEMESTER & SUBJECT DETECTION
+# Works regardless of filename.  Scans the first 15 rows of any .xlsx/.csv
+# for university metadata (rows 1-6 typically contain institution, dept,
+# subject, semester, session, date — before the actual data header row).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _prettify_subject_local(raw: str) -> str:
+    """
+    Local fallback for subject prettification when parser_agent is not importable.
+    'SoftEng' → 'Soft Eng'  |  'DataStructures' → 'Data Structures'
+    """
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    s = s.replace("_", " ").replace("-", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.title() if len(s) > 2 else s.upper()
+
+
+def _do_prettify(raw: str) -> str:
+    """Use parser_agent._prettify_subject if available, else local fallback."""
+    if _PARSER_OK:
+        try:
+            return _prettify_subject(raw)
+        except Exception:
+            pass
+    return _prettify_subject_local(raw)
+
+
+# Semester regex patterns applied to individual cell values (three layouts)
+_CONTENT_SEM_PATTERNS: list[re.Pattern] = [
+    # "Semester: 3"  "Sem: 3"  "Semester No. 3"  "Sem-3"
+    re.compile(r'(?:semester|sem)(?:ester)?\s*(?:no\.?|number|#)?\s*[:\-–]?\s*(\d)', re.I),
+    # "3rd Semester"  "3 Semester"
+    re.compile(r'(\d)\s*(?:st|nd|rd|th)?\s+semester', re.I),
+    # "Semester 3"  (space-separated, number after)
+    re.compile(r'(?:semester|sem)(?:ester)?\s+(\d)\b', re.I),
+]
+
+# Keywords treated as semester-key cells (for two-cell "Semester | 3" format)
+_SEM_KEY_CELLS: frozenset[str] = frozenset({
+    'semester', 'sem', 'semester no', 'sem no',
+    'semester number', 'sem number', 'semester#', 'sem.',
+    'semester no.', 'semester no:', 'sem no.',
+})
+
+# Keywords treated as subject-key cells
+_SUBJ_KEY_CELLS: frozenset[str] = frozenset({
+    'subject', 'subject name', 'course', 'course name',
+    'paper', 'paper name', 'paper title', 'course title', 'subject title',
+})
+
+# Data-column indicators — stop metadata scan when we hit this row
+# (prevents false positives from "Subject Name" in the actual column header row)
+_DATA_COL_INDICATORS: frozenset[str] = frozenset({
+    'roll', 'marks', 'obtained', 'credit', 'grade', 'percentage', 'scored',
+})
+
+
+def extract_meta_from_content(
+    file_bytes: bytes,
+    filename: str,
+) -> tuple[str | None, str | None]:
+    """
+    Scan the first 15 rows of an Excel/CSV file to detect:
+      • semester_label  — "Semester N" (N = 1–8)
+      • subject_name    — prettified subject string
+
+    Three cell layouts handled:
+      A) Single-cell colon  : "Semester: 3"  /  "Subject: Operating Systems"
+      B) Two-cell key–value : | Semester | 3 |  /  | Subject | OS |
+      C) Free text in cell  : "3rd Semester" appearing anywhere
+
+    Stops scanning as soon as both values are found, OR when it encounters
+    a row that looks like the student-data column header (≥3 cells with ≥2
+    data-column keywords such as 'roll', 'marks', 'obtained', 'credit').
+    This prevents picking up "Subject Name" from the header row as a subject.
+
+    Returns (semester_label, subject_name); either may be None.
+    """
+    ext = Path(filename).suffix.lower()
+    buf = io.BytesIO(file_bytes)
+    try:
+        df_raw = (
+            pd.read_csv(buf, header=None, dtype=str, nrows=15)
+            if ext == ".csv"
+            else pd.read_excel(buf, header=None, dtype=str, nrows=15, engine="openpyxl")
+        )
+    except Exception:
+        return None, None
+
+    semester_label: str | None = None
+    subject_name:   str | None = None
+
+    def _try_sem(text: str) -> str | None:
+        """Return 'Semester N' if text matches any semester pattern, else None."""
+        for pat in _CONTENT_SEM_PATTERNS:
+            m = pat.search(text)
+            if m:
+                try:
+                    n = int(m.group(1))
+                    if 1 <= n <= 8:
+                        return f"Semester {n}"
+                except (ValueError, IndexError):
+                    pass
+        return None
+
+    def _is_data_header(cells: list[str]) -> bool:
+        """Return True when this row looks like the student-data column header."""
+        if len(cells) < 3:
+            return False
+        joined = " ".join(c.lower() for c in cells)
+        hits = sum(1 for kw in _DATA_COL_INDICATORS if kw in joined)
+        return hits >= 2
+
+    for row_i in range(min(15, len(df_raw))):
+        # Collect non-null, non-empty cell strings for this row
+        cells = [
+            str(v).strip()
+            for v in df_raw.iloc[row_i].values
+            if pd.notna(v) and str(v).strip().lower() not in ("", "nan", "none")
+        ]
+        if not cells:
+            continue
+
+        # Stop scanning once we hit the actual student-data header row
+        if _is_data_header(cells):
+            break
+
+        for col_j, cell in enumerate(cells):
+            cell_lower = cell.lower().strip()
+
+            # ── Semester detection ─────────────────────────────────────────────
+            if semester_label is None:
+                # Layout C / A  — value embedded in the cell itself
+                found = _try_sem(cell)
+                if found:
+                    semester_label = found
+                else:
+                    # Layout B — key cell ("Semester") + next-cell value ("3")
+                    key_norm = cell_lower.rstrip(":").strip()
+                    if key_norm in _SEM_KEY_CELLS and col_j + 1 < len(cells):
+                        val = cells[col_j + 1].strip()
+                        # Value might be a bare digit or "S3" style
+                        try:
+                            n = int(float(val))
+                            if 1 <= n <= 8:
+                                semester_label = f"Semester {n}"
+                        except (ValueError, TypeError):
+                            m = re.match(r"^S(\d)$", val, re.I)
+                            if m:
+                                n = int(m.group(1))
+                                if 1 <= n <= 8:
+                                    semester_label = f"Semester {n}"
+
+            # ── Subject detection ──────────────────────────────────────────────
+            if subject_name is None:
+                if ":" in cell:
+                    # Layout A — "Subject: Operating Systems"
+                    key_part = cell.split(":", 1)[0].strip().lower()
+                    val_part = cell.split(":", 1)[1].strip()
+                    if key_part in _SUBJ_KEY_CELLS and val_part and len(val_part) > 1:
+                        subject_name = _do_prettify(val_part)
+                else:
+                    # Layout B — | Subject | Operating Systems |
+                    key_norm = cell_lower.rstrip(":").strip()
+                    if key_norm in _SUBJ_KEY_CELLS and col_j + 1 < len(cells):
+                        val = cells[col_j + 1].strip()
+                        # Guard: skip if the next cell looks like a semester value
+                        if val and len(val) > 1 and not _try_sem(val):
+                            subject_name = _do_prettify(val)
+
+        if semester_label and subject_name:
+            break   # both found — no need to scan further rows
+
+    return semester_label, subject_name
+
+
+def _safe_key(s: str) -> str:
+    """Convert any string to a safe Streamlit widget key (no spaces/special chars)."""
+    return re.sub(r"[^a-zA-Z0-9]", "_", s)
+
+
+def _apply_editor_edits(df: pd.DataFrame, editor_key: str) -> pd.DataFrame:
+    """
+    Read the CURRENT st.data_editor widget state from session_state and apply
+    it to *df*, returning an updated copy.
+
+    WHY THIS EXISTS
+    ───────────────
+    Streamlit stores a data_editor's pending edits in
+    st.session_state[editor_key] as:
+        {
+            "edited_rows" : { "row_idx": {"col": new_val, …}, … },
+            "added_rows"  : [ {"col": val, …}, … ],
+            "deleted_rows": [ row_idx, … ]
+        }
+    This dict is written by Streamlit *before* the script re-runs, so reading
+    it here (before the widget call) gives the CURRENT edit state — not the
+    previous render's state.  Without this, there is a one-render lag where
+    a user fills in a credit_hours cell but the validation still reads the old
+    None value and keeps showing EC-09 BLOCKED.
+
+    USAGE
+    ─────
+    Call this just before running validate_records(), passing the same key
+    that will be used for st.data_editor() later in the same render cycle.
+    """
+    if editor_key not in st.session_state:
+        return df
+
+    edits = st.session_state[editor_key]
+    if not isinstance(edits, dict):
+        return df
+
+    df = df.copy()
+
+    # ── Apply cell-level edits ─────────────────────────────────────────────────
+    for row_idx_str, changes in edits.get("edited_rows", {}).items():
+        try:
+            row_idx = int(row_idx_str)
+        except (ValueError, TypeError):
+            continue
+        if row_idx >= len(df):
+            continue
+        for col, val in changes.items():
+            if col in df.columns:
+                df.at[row_idx, col] = val
+
+    # ── Apply added rows ───────────────────────────────────────────────────────
+    added = edits.get("added_rows", [])
+    if added:
+        df = pd.concat(
+            [df, pd.DataFrame(added, columns=df.columns)],
+            ignore_index=True,
+        )
+
+    # ── Apply deleted rows ─────────────────────────────────────────────────────
+    deleted = [int(i) for i in edits.get("deleted_rows", [])
+               if int(i) < len(df)]
+    if deleted:
+        df = df.drop(index=deleted).reset_index(drop=True)
+
+    return df
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -327,8 +3924,9 @@ def df_to_records(df: pd.DataFrame) -> list[dict]:
         rec: dict[str, Any] = {"has_issues": False, "parse_warnings": []}
         for col in EDITOR_COLS:
             val = row.get(col)
-            is_null = val is None or (isinstance(val, float) and pd.isna(val)) \
-                      or str(val).strip() in ("", "nan", "None", "NaT")
+            is_null = (val is None
+                       or (isinstance(val, float) and pd.isna(val))
+                       or str(val).strip() in ("", "nan", "None", "NaT"))
             if is_null:
                 rec[col] = None
                 continue
@@ -366,21 +3964,23 @@ def infer_academic_year(sn: int) -> str:
 
 def _init() -> None:
     defaults: dict[str, Any] = {
-        "stage"           : "upload",     # upload|assign|review|calculate|results
-        "raw_files"       : {},           # {fname: bytes}
-        "file_assignments": {},           # {fname: "Semester N" | None}
-        "file_subjects"   : {},           # {fname: subject_hint}
-        "semester_groups" : {},           # {sem: [fname, ...]}
-        "sem_records"     : {},           # {sem: list[dict]}  combined records
-        "sem_dfs"         : {},           # {sem: pd.DataFrame}
-        "approvals"       : {},           # {sem: bool}
-        "val_reports"     : {},           # {sem: report.model_dump()}
-        "review_idx"      : 0,
-        "ordered_sems"    : [],
-        "calc_results"    : None,
-        "final_saved"     : False,
-        "db_url"          : DEFAULT_DB,
-        "academic_year"   : "",
+        "stage"            : "upload",
+        "raw_files"        : {},   # {fname: bytes}
+        "file_assignments" : {},   # {fname: "Semester N" | None}
+        "file_subjects"    : {},   # {fname: subject_hint_str}
+        "detection_source" : {},   # {fname: "content" | "filename" | "none"}
+        "semester_groups"  : {},   # {sem: [fname, …]}
+        "sem_file_records" : {},   # {sem: {fname: list[dict]}}
+        "sem_file_dfs"     : {},   # {sem: {fname: pd.DataFrame}}
+        "sem_records"      : {},   # {sem: list[dict]}  — combined for calculator
+        "approvals"        : {},   # {sem: bool}
+        "val_reports"      : {},   # {sem: report_dict}  (legacy compat)
+        "ordered_sems"     : [],
+        "calc_results"     : None,
+        "final_saved"      : False,
+        "db_url"           : DEFAULT_DB,
+        "academic_year"    : "",
+        "invalid_files"    : [],   # kept for legacy compat; always empty now
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -394,43 +3994,37 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("""
         <div style="padding:16px 0 8px 0">
-            <div style="font-size:1.4rem;font-weight:800;color:#F1F5F9;letter-spacing:-0.5px">
+            <div style="font-size:1.4rem;font-weight:800;color:#F1F5F9;letter-spacing:-.5px">
                 🎓 GPA System
             </div>
-            <div style="font-size:0.75rem;color:#94A3B8;margin-top:2px">
+            <div style="font-size:.75rem;color:#94A3B8;margin-top:2px">
                 University of Loralai · CS Dept
             </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
         st.divider()
 
-        # ── Pipeline steps ─────────────────────────────────────────────────
         st.markdown('<div class="section-label" style="color:#475569">Pipeline</div>',
                     unsafe_allow_html=True)
-        stages   = ["upload", "assign", "review", "calculate", "results"]
-        labels   = ["Upload Files", "Assign Semesters", "HITL Review",
-                    "GPA Calculation", "Results & Save"]
-        icons    = ["📁", "🗂️", "📋", "⚙️", "📊"]
-        cur      = st.session_state.stage
-        cur_idx  = stages.index(cur)
+        stages  = ["upload", "assign", "review", "calculate", "results"]
+        labels  = ["Upload Files", "Review Assignments", "HITL Review (Tabs)",
+                   "GPA Calculation", "Results & Save"]
+        icons   = ["📁", "🗂️", "📋", "⚙️", "📊"]
+        cur     = st.session_state.stage
+        cur_idx = stages.index(cur)
 
         for i, (s, lbl, ico) in enumerate(zip(stages, labels, icons)):
-            if i < cur_idx:
-                cls, prefix = "sb-step sb-done", "✓"
-            elif i == cur_idx:
-                cls, prefix = "sb-step sb-active", "▶"
-            else:
-                cls, prefix = "sb-step sb-pending", "○"
+            cls    = ("sb-step sb-done" if i < cur_idx
+                      else "sb-step sb-active" if i == cur_idx
+                      else "sb-step sb-pending")
+            prefix = "✓" if i < cur_idx else "▶" if i == cur_idx else "○"
             st.markdown(
-                f'<div class="{cls}">'
-                f'<span style="font-size:1rem">{ico}</span>'
+                f'<div class="{cls}"><span style="font-size:1rem">{ico}</span>'
                 f'<span>{prefix} {lbl}</span></div>',
                 unsafe_allow_html=True,
             )
 
         st.divider()
 
-        # ── Semester approval grid ─────────────────────────────────────────
         ordered = st.session_state.ordered_sems
         if ordered:
             st.markdown('<div class="section-label" style="color:#475569">Semester Status</div>',
@@ -438,23 +4032,16 @@ def render_sidebar() -> None:
             for sem in ordered:
                 ok    = st.session_state.approvals.get(sem, False)
                 files = st.session_state.semester_groups.get(sem, [])
-                is_active = (
-                    st.session_state.stage == "review"
-                    and st.session_state.review_idx < len(ordered)
-                    and sem == ordered[st.session_state.review_idx]
-                )
-                icon = "✅" if ok else ("🔵" if is_active else "○")
+                icon  = "✅" if ok else "🔵"
                 st.markdown(
-                    f'<div class="sb-sem">'
-                    f'<span>{icon}</span>'
-                    f'<span style="flex:1;font-size:0.8rem">{sem}</span>'
-                    f'<span style="font-size:0.7rem;color:#475569">{len(files)} file(s)</span>'
+                    f'<div class="sb-sem"><span>{icon}</span>'
+                    f'<span style="flex:1;font-size:.8rem">{sem}</span>'
+                    f'<span style="font-size:.7rem;color:#475569">{len(files)} file(s)</span>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
             st.divider()
 
-        # ── System health ──────────────────────────────────────────────────
         st.markdown('<div class="section-label" style="color:#475569">System Health</div>',
                     unsafe_allow_html=True)
 
@@ -477,7 +4064,6 @@ def render_sidebar() -> None:
 
         st.divider()
 
-        # ── Settings ───────────────────────────────────────────────────────
         with st.expander("⚙️ Settings"):
             st.session_state.db_url = st.text_input(
                 "Database URL", value=st.session_state.db_url,
@@ -485,39 +4071,41 @@ def render_sidebar() -> None:
             )
             st.session_state.academic_year = st.text_input(
                 "Academic Year", value=st.session_state.academic_year,
-                placeholder="e.g. 2024-2025",
-                help="Leave blank to auto-infer"
+                placeholder="e.g. 2024-2025", help="Leave blank to auto-infer"
             )
 
         st.markdown(
-            '<div style="font-size:0.7rem;color:#475569;margin-top:12px">'
-            'v1.0 · HEC Pakistan GPA Standard</div>',
+            '<div style="font-size:.7rem;color:#475569;margin-top:12px">'
+            'v2.1 · HEC Pakistan GPA Standard</div>',
             unsafe_allow_html=True,
         )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STAGE 0 — UPLOAD  (any filename accepted)
+# STAGE 0 — UPLOAD  (file-name independent — content-based detection)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render_upload() -> None:
-    st.markdown('<div class="stage-title">📁 Upload Mark Sheet Files</div>', unsafe_allow_html=True)
+    st.markdown('<div class="stage-title">📁 Upload Mark Sheet Files</div>',
+                unsafe_allow_html=True)
     st.markdown(
-        '<div class="stage-subtitle">Upload any .xlsx or .csv files — '
-        'no specific naming convention required. '
-        'The system will auto-detect semesters from filenames (e.g. S1, S2, Sem3) '
-        'and you can confirm or change every assignment before processing.</div>',
+        '<div class="stage-subtitle">'
+        'Upload any <code>.xlsx</code> or <code>.csv</code> mark sheet — '
+        '<b>any filename is accepted</b>. '
+        'Semester and subject are auto-detected from the file\'s own content '
+        '(the university metadata rows at the top of each sheet). '
+        'If detection fails you can assign them manually on the next step.'
+        '</div>',
         unsafe_allow_html=True,
     )
 
     uploaded = st.file_uploader(
-        "Drop all your mark sheet files here",
+        "Drop mark sheet files here",
         type=["xlsx", "csv"],
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
 
-    # ── Strength reference ─────────────────────────────────────────────────
     with st.expander("📊 HOD Ground-Truth Student Strength Baseline"):
         cols = st.columns(4)
         for i, (sem, n) in enumerate(EXPECTED_STRENGTH.items()):
@@ -527,179 +4115,249 @@ def render_upload() -> None:
         st.markdown("""
         <div class="upload-zone">
             <h3>📂 No files uploaded yet</h3>
-            <p>Supports any naming convention — S1-Subject.xlsx, SemX-Name.csv,<br>
-               DataStructures.xlsx, marks_fall2024.xlsx, and more.</p>
-        </div>
-        """, unsafe_allow_html=True)
+            <p>Upload one <code>.xlsx</code> or <code>.csv</code> file per subject per semester.<br>
+               <b>Any filename is accepted</b> — semester and subject are read from file content.<br>
+               If auto-detection cannot find them, you assign manually on the next step.</p>
+        </div>""", unsafe_allow_html=True)
         return
 
-    # ── Build raw_files dict ───────────────────────────────────────────────
-    raw: dict[str, bytes] = {uf.name: uf.read() for uf in uploaded}
+    # ── Accept all uploaded files regardless of filename ──────────────────────
+    valid_files: dict[str, bytes] = {}
+    for uf in uploaded:
+        valid_files[uf.name] = uf.read()
 
-    # ── Auto-detect semester + subject from filename ────────────────────────
+    # ── Content-based detection for every file ────────────────────────────────
     auto_sem: dict[str, str | None] = {}
-    auto_sub: dict[str, str | None] = {}
-    for fname in raw:
-        s, sub = (detect_semester_and_subject(fname)
-                  if _PARSER_OK
-                  else _fallback_detect(fname))
-        auto_sem[fname] = s
-        auto_sub[fname] = sub
+    auto_sub: dict[str, str]        = {}
+    detection_source: dict[str, str] = {}   # "content" | "filename" | "none"
 
-    detected   = sum(1 for v in auto_sem.values() if v)
-    undetected = len(raw) - detected
+    for fname, data in valid_files.items():
+        sem_label, subject = extract_meta_from_content(data, fname)
 
-    # ── Summary cards ──────────────────────────────────────────────────────
+        if sem_label:
+            auto_sem[fname]          = sem_label
+            detection_source[fname]  = "content"
+        else:
+            # Secondary: try filename-based detection (handles legacy S{N}-... names)
+            fl_sem: str | None = None
+            fl_sub: str | None = None
+            if _PARSER_OK:
+                try:
+                    fl_sem, fl_sub = detect_semester_and_subject(fname)
+                except Exception:
+                    pass
+            if fl_sem:
+                auto_sem[fname]         = fl_sem
+                detection_source[fname] = "filename"
+                if not subject and fl_sub:
+                    subject = fl_sub
+            else:
+                auto_sem[fname]         = None     # user must assign manually
+                detection_source[fname] = "none"
+
+        auto_sub[fname] = subject or ""
+
+    # ── Summary metrics ────────────────────────────────────────────────────────
+    n_detected   = sum(1 for v in auto_sem.values() if v is not None)
+    n_undetected = len(valid_files) - n_detected
+    sem_groups_preview: dict[str, list[str]] = {}
+    for fname, sem in auto_sem.items():
+        if sem:
+            sem_groups_preview.setdefault(sem, []).append(fname)
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Files Uploaded",   len(raw))
-    c2.metric("Auto-Detected",    detected,   delta=None)
-    c3.metric("Need Assignment",  undetected,
-              delta=f"−{undetected}" if undetected else None,
-              delta_color="inverse" if undetected else "off")
-    c4.metric("Unique Semesters",
-              len({v for v in auto_sem.values() if v}))
+    c1.metric("Files Uploaded",         len(valid_files))
+    c2.metric("Semester Auto-Detected", n_detected)
+    c3.metric("Needs Manual Assignment", n_undetected,
+              delta=f"!{n_undetected}" if n_undetected else None,
+              delta_color="inverse" if n_undetected else "off")
+    c4.metric("Semesters Found",         len(sem_groups_preview))
 
-    if undetected:
+    if n_undetected == 0:
         st.markdown(
-            f'<div class="banner banner-warning">⚠️  <b>{undetected} file(s)</b> '
-            f'could not be assigned automatically — you will set them manually '
-            f'in the next step.</div>',
+            '<div class="banner banner-success">✅ Semester detected from content for all '
+            'files. Review assignments on the next step.</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<div class="banner banner-success">✅  All files have been '
-            'automatically matched to semesters. Review assignments on the next step.'
-            '</div>', unsafe_allow_html=True,
-        )
-
-    # ── File preview list ──────────────────────────────────────────────────
-    st.markdown('<div class="section-label" style="margin-top:16px">Detected Files</div>',
-                unsafe_allow_html=True)
-    hdr = st.columns([3, 1.2, 2, 2.2])
-    for lbl in ("Filename", "Size", "Detected Semester", "Detected Subject"):
-        hdr[["Filename","Size","Detected Semester","Detected Subject"].index(lbl)].markdown(
-            f'<div style="font-size:0.75rem;font-weight:700;color:#64748B;'
-            f'text-transform:uppercase;letter-spacing:0.8px">{lbl}</div>',
+            f'<div class="banner banner-warning">⚠️ Semester could not be detected in '
+            f'<b>{n_undetected}</b> file(s). '
+            f'You can assign semesters manually on the next step — the pipeline will not '
+            f'proceed until every file has a semester.</div>',
             unsafe_allow_html=True,
         )
-    for fname, data in raw.items():
-        c = st.columns([3, 1.2, 2, 2.2])
+
+    # ── File list ──────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-label" style="margin-top:16px">Detected Files</div>',
+                unsafe_allow_html=True)
+    hdr = st.columns([3, 1.1, 2.3, 2.1, 1.3])
+    for lbl in ("Filename", "Size", "Semester Detected", "Subject Detected", "Source"):
+        hdr[("Filename", "Size", "Semester Detected", "Subject Detected", "Source").index(lbl)]\
+            .markdown(
+                f'<div style="font-size:.75rem;font-weight:700;color:#64748B;'
+                f'text-transform:uppercase;letter-spacing:.8px">{lbl}</div>',
+                unsafe_allow_html=True,
+            )
+
+    _src_badge = {
+        "content" : '<span class="badge badge-clean"  title="Detected from file content">📄 Content</span>',
+        "filename": '<span class="badge badge-info"   title="Detected from filename">📁 Filename</span>',
+        "none"    : '<span class="badge badge-flagged" title="Manual assignment needed">✏️ Manual</span>',
+    }
+
+    for fname, data in valid_files.items():
+        c = st.columns([3, 1.1, 2.3, 2.1, 1.3])
+        sem = auto_sem.get(fname)
+        sub = auto_sub.get(fname) or "—"
+        src = detection_source.get(fname, "none")
+
         c[0].markdown(f'<div class="file-chip">📄 {fname}</div>', unsafe_allow_html=True)
-        c[1].markdown(f'<span style="font-size:0.82rem;color:#64748B">{fmt_size(len(data))}</span>',
-                      unsafe_allow_html=True)
-        sem = auto_sem[fname]
-        sub = auto_sub[fname]
+        c[1].markdown(
+            f'<span style="font-size:.82rem;color:#64748B">{fmt_size(len(data))}</span>',
+            unsafe_allow_html=True,
+        )
         if sem:
             c[2].markdown(f'<span class="badge badge-clean">✓ {sem}</span>',
                           unsafe_allow_html=True)
         else:
-            c[2].markdown('<span class="badge badge-flagged">⚠ Undetected</span>',
+            c[2].markdown('<span class="badge badge-blocked">⚠ Not Detected</span>',
                           unsafe_allow_html=True)
         c[3].markdown(
-            f'<span style="font-size:0.82rem;color:#374151">{sub or "—"}</span>',
+            f'<span style="font-size:.82rem;color:#374151">{sub}</span>',
             unsafe_allow_html=True,
         )
+        c[4].markdown(_src_badge.get(src, ""), unsafe_allow_html=True)
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    if st.button("Next → Confirm Semester Assignments", type="primary",
-                 use_container_width=True):
-        st.session_state.raw_files        = raw
+    if st.button("Next → Review Assignments", type="primary", use_container_width=True):
+        st.session_state.raw_files        = valid_files
         st.session_state.file_assignments = dict(auto_sem)
         st.session_state.file_subjects    = dict(auto_sub)
+        st.session_state.detection_source = detection_source
+        st.session_state.invalid_files    = []
         st.session_state.stage            = "assign"
         st.rerun()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STAGE 1 — ASSIGN  (confirm / override semester per file)
+# STAGE 1 — ASSIGN  (semester is now an editable dropdown, not read-only)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render_assign() -> None:
-    st.markdown('<div class="stage-title">🗂️ Confirm Semester Assignments</div>',
+    st.markdown('<div class="stage-title">🗂️ Review & Confirm Assignments</div>',
                 unsafe_allow_html=True)
     st.markdown(
-        '<div class="stage-subtitle">Review auto-detected assignments and override '
-        'any that are wrong. Every file must be assigned before review begins.</div>',
+        '<div class="stage-subtitle">'
+        'Review auto-detected semester and subject assignments. '
+        'Use the <b>Semester</b> dropdown to correct any wrong detection or to assign '
+        'files where detection failed. '
+        'Every file must have a semester before you can proceed to HITL review.'
+        '</div>',
         unsafe_allow_html=True,
     )
 
-    raw       = st.session_state.raw_files
-    assigns   = dict(st.session_state.file_assignments)   # mutable local copy
-    subjects  = dict(st.session_state.file_subjects)
+    raw              = st.session_state.raw_files
+    # Read stored assignments as the starting values; widgets may override them below
+    stored_assigns   = st.session_state.file_assignments   # {fname: sem | None}
+    subjects         = dict(st.session_state.file_subjects)
+    detection_source = st.session_state.get("detection_source", {})
 
+    # ── Assignment table (one row per file) ───────────────────────────────────
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">File Assignment Table</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">File Assignments — Semester (Editable) · Subject (Editable)</div>',
+        unsafe_allow_html=True,
+    )
 
-    # ── Editable table (one row per file) ─────────────────────────────────
-    for fname, data in raw.items():
-        col_f, col_sz, col_sem, col_sub = st.columns([3, 1, 2.2, 2.5])
+    # Collect current widget values into a fresh assigns dict
+    assigns: dict[str, str | None] = {}
+
+    for i, (fname, data) in enumerate(raw.items()):
+        col_f, col_sz, col_sem, col_sub, col_src = st.columns([2.5, 0.9, 2, 2.5, 1.1])
 
         col_f.markdown(
             f'<div style="padding-top:8px"><span class="file-chip">📄 {fname}</span></div>',
             unsafe_allow_html=True,
         )
         col_sz.markdown(
-            f'<div style="padding-top:10px;font-size:0.8rem;color:#64748B">'
+            f'<div style="padding-top:10px;font-size:.8rem;color:#64748B">'
             f'{fmt_size(len(data))}</div>',
             unsafe_allow_html=True,
         )
 
-        # Semester select
-        current = assigns.get(fname)
-        default_idx = SEM_OPTIONS.index(current) if current in SEM_OPTIONS else 0
-        choice = col_sem.selectbox(
-            f"sem_{fname}", SEM_OPTIONS,
-            index=default_idx,
-            label_visibility="collapsed",
-            key=f"sem_sel_{fname}",
+        # Semester selectbox — pre-fill from stored detection, editable by user
+        stored_sem = stored_assigns.get(fname)
+        sem_idx    = (
+            _SEM_OPTIONS.index(stored_sem)
+            if stored_sem and stored_sem in _SEM_OPTIONS
+            else 0
         )
-        assigns[fname] = None if choice == "— Unassigned —" else choice
+        selected_sem = col_sem.selectbox(
+            label             = f"sem_{fname}",
+            options           = _SEM_OPTIONS,
+            index             = sem_idx,
+            key               = f"sem_sel_{i}_{_safe_key(fname)}",
+            label_visibility  = "collapsed",
+        )
+        assigns[fname] = selected_sem if selected_sem != _SEM_OPTIONS[0] else None
 
-        # Subject editable
+        # Subject text input — editable
         sub_val = col_sub.text_input(
-            f"sub_{fname}",
-            value=subjects.get(fname) or "",
-            placeholder="Subject name (optional)",
-            label_visibility="collapsed",
-            key=f"sub_inp_{fname}",
+            label            = f"sub_{fname}",
+            value            = subjects.get(fname) or "",
+            placeholder      = "Subject name",
+            label_visibility = "collapsed",
+            key              = f"sub_inp_{i}_{_safe_key(fname)}",
         )
-        subjects[fname] = sub_val.strip() or None
+        subjects[fname] = sub_val.strip()
+
+        # Detection-source badge (informational)
+        src = detection_source.get(fname, "none")
+        _src_html = {
+            "content" : '<span class="badge badge-clean"  title="Detected from file content">📄 Auto</span>',
+            "filename": '<span class="badge badge-info"   title="Detected from filename">📁 Name</span>',
+            "none"    : '<span class="badge badge-flagged" title="Manually assigned">✏️ Manual</span>',
+        }
+        col_src.markdown(
+            f'<div style="padding-top:10px">{_src_html.get(src, "")}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Assignment summary by semester ─────────────────────────────────────
+    # ── Unassigned-file warning ────────────────────────────────────────────────
+    unassigned = [f for f, s in assigns.items() if not s]
+    if unassigned:
+        st.markdown(
+            f'<div class="banner banner-warning">⚠️ '
+            f'<b>{len(unassigned)}</b> file(s) still need a semester assigned: '
+            + ", ".join(f"<code>{f}</code>" for f in unassigned) +
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Assignment summary by semester ─────────────────────────────────────────
     sem_groups: dict[str, list[str]] = {}
     for fname, sem in assigns.items():
         if sem:
             sem_groups.setdefault(sem, []).append(fname)
 
-    unassigned = [f for f, s in assigns.items() if not s]
-
-    st.markdown('<div class="section-label" style="margin-top:8px">Assignment Summary</div>',
-                unsafe_allow_html=True)
-    cols = st.columns(min(len(sem_groups) or 1, 4))
-    for i, (sem, files) in enumerate(sorted(sem_groups.items(), key=lambda x: sem_num(x[0]))):
-        expected = EXPECTED_STRENGTH.get(sem, 0)
-        cols[i % 4].markdown(f"""
-        <div class="kpi-box">
-            <div class="kpi-value">{len(files)}</div>
-            <div class="kpi-label">{sem}</div>
-            <div style="font-size:0.75rem;color:#94A3B8;margin-top:4px">
-                Expected: {expected} students
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if unassigned:
-        st.markdown(
-            f'<div class="banner banner-critical">🚫 <b>{len(unassigned)} file(s) '
-            f'still unassigned</b>: '
-            + ", ".join(f"<code>{f}</code>" for f in unassigned)
-            + '. Assign them above to continue.</div>',
-            unsafe_allow_html=True,
-        )
+    if sem_groups:
+        st.markdown('<div class="section-label" style="margin-top:8px">Assignment Summary</div>',
+                    unsafe_allow_html=True)
+        sem_cols = st.columns(min(len(sem_groups), 4))
+        for i, (sem, files) in enumerate(
+            sorted(sem_groups.items(), key=lambda x: sem_num(x[0]))
+        ):
+            expected = EXPECTED_STRENGTH.get(sem, 0)
+            sem_cols[i % 4].markdown(f"""<div class="kpi-box">
+                <div class="kpi-value">{len(files)}</div>
+                <div class="kpi-label">{sem}</div>
+                <div style="font-size:.75rem;color:#94A3B8;margin-top:4px">
+                    {len(files)} subject file(s) · Expected {expected} students
+                </div></div>""", unsafe_allow_html=True)
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
     bc1, bc2 = st.columns([1, 5])
@@ -708,18 +4366,23 @@ def render_assign() -> None:
             st.session_state.stage = "upload"
             st.rerun()
     with bc2:
-        can_proceed = not unassigned and bool(sem_groups)
-        if st.button("Begin HITL Review →", type="primary",
-                     disabled=not can_proceed, use_container_width=True):
+        can_proceed = len(unassigned) == 0 and bool(sem_groups)
+        if st.button(
+            "Begin HITL Review →",
+            type                = "primary",
+            use_container_width = True,
+            disabled            = not can_proceed,
+        ):
             ordered = sorted(sem_groups.keys(), key=sem_num)
+            # Persist the user-edited assignments back to session state
             st.session_state.file_assignments = assigns
             st.session_state.file_subjects    = subjects
             st.session_state.semester_groups  = sem_groups
             st.session_state.ordered_sems     = ordered
-            st.session_state.review_idx       = 0
             st.session_state.approvals        = {}
+            st.session_state.sem_file_records = {}
+            st.session_state.sem_file_dfs     = {}
             st.session_state.sem_records      = {}
-            st.session_state.sem_dfs          = {}
             st.session_state.val_reports      = {}
             st.session_state.calc_results     = None
             st.session_state.final_saved      = False
@@ -728,205 +4391,375 @@ def render_assign() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# STAGE 2 — REVIEW  (HITL carousel, one semester at a time)
+# STAGE 2 — REVIEW  (tab-based — one tab per semester, all visible at once)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def render_review() -> None:
     ordered = st.session_state.ordered_sems
-    idx     = st.session_state.review_idx
-
-    if idx >= len(ordered):
+    if not ordered:
         st.session_state.stage = "calculate"
         st.rerun()
         return
 
-    cur_sem = ordered[idx]
+    approved_count = sum(1 for s in ordered if st.session_state.approvals.get(s, False))
+    total          = len(ordered)
 
-    # ── Progress timeline ──────────────────────────────────────────────────
-    tl_html = '<div class="timeline">'
-    for i, sem in enumerate(ordered):
-        ok = st.session_state.approvals.get(sem, False)
-        if i < idx or ok:
-            cls = "tl-done"; icon = "✓"
-        elif i == idx:
-            cls = "tl-active"; icon = "▶"
-        else:
-            cls = "tl-pending"; icon = str(i + 1)
-        tl_html += f'<div class="tl-step {cls}">{icon} {sem}</div>'
-        if i < len(ordered) - 1:
-            tl_html += '<div class="tl-arrow">›</div>'
-    tl_html += '</div>'
-    st.markdown(tl_html, unsafe_allow_html=True)
-
+    st.markdown('<div class="stage-title">📋 HITL Review — Semester Tabs</div>',
+                unsafe_allow_html=True)
     st.markdown(
-        f'<div class="stage-title">📋 Reviewing {cur_sem}</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="stage-subtitle">Step {idx + 1} of {len(ordered)} — '
-        f'Parse, verify strength, fix issues, then approve.</div>',
+        f'<div class="stage-subtitle">Each tab is one semester. '
+        f'Validate each file independently, fix any BLOCKED errors, then approve. '
+        f'<b>{approved_count} / {total}</b> semesters approved.</div>',
         unsafe_allow_html=True,
     )
 
-    _review_panel(cur_sem, idx, ordered)
+    # Overall progress banner
+    if approved_count == total:
+        st.markdown(
+            '<div class="banner banner-success">✅ All semesters approved! '
+            'Click below to run GPA calculation.</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Semester tabs ──────────────────────────────────────────────────────────
+    tab_labels = [
+        f"✅ {s}" if st.session_state.approvals.get(s, False) else s
+        for s in ordered
+    ]
+    tabs = st.tabs(tab_labels)
+    for tab, sem in zip(tabs, ordered):
+        with tab:
+            _review_tab_panel(sem)
+
+    # ── Bottom navigation ──────────────────────────────────────────────────────
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    bc1, bc2 = st.columns([1, 4])
+    with bc1:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.stage = "assign"
+            st.rerun()
+    with bc2:
+        btn_label = (
+            f"Proceed to GPA Calculation ({approved_count}/{total} approved) →"
+        )
+        if st.button(btn_label, type="primary",
+                     disabled=(approved_count < total), use_container_width=True):
+            st.session_state.stage = "calculate"
+            st.rerun()
 
 
-def _parse_semester(sem: str) -> None:
-    """Parse + combine all files assigned to this semester (runs once per sem)."""
-    groups   = st.session_state.semester_groups.get(sem, [])
-    raw      = st.session_state.raw_files
-    subjects = st.session_state.file_subjects
-    combined: list[dict] = []
+# ──────────────────────────────────────────────────────────────────────────────
+# REVIEW TAB HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _parse_semester_files(sem: str) -> None:
+    """
+    Parse every file assigned to *sem* SEPARATELY (not combined).
+    Stores results in:
+      st.session_state.sem_file_records[sem] = {fname: list[dict]}
+      st.session_state.sem_file_dfs[sem]     = {fname: pd.DataFrame}
+    """
+    groups     = st.session_state.semester_groups.get(sem, [])
+    raw        = st.session_state.raw_files
+    subj_hints = st.session_state.file_subjects
+
+    file_records: dict[str, list[dict]]    = {}
+    file_dfs    : dict[str, pd.DataFrame] = {}
+
+    # Warnings that are purely internal parser diagnostics — never shown to user.
+    # "Header row detected at row X; N title row(s) skipped." is operational
+    # noise: the parser skips university metadata rows automatically, but
+    # showing this message confuses users who think data has been lost.
+    _SUPPRESS_PATTERNS = (
+        "header row detected",
+        "title row(s) skipped",
+    )
+
+    def _is_user_facing(warning: str) -> bool:
+        wl = warning.lower()
+        return not any(pat in wl for pat in _SUPPRESS_PATTERNS)
 
     for fname in groups:
-        fb = raw.get(fname, b"")
-        sub_hint = subjects.get(fname)
+        fb       = raw.get(fname, b"")
+        sub_hint = subj_hints.get(fname)
 
         if _PARSER_OK:
             try:
                 result = parse_file_to_records(fb, fname, subject_hint=sub_hint)
             except Exception as exc:
-                result = {"status": "ERROR", "records": [],
-                          "warnings": [str(exc)], "file_name": fname}
+                result = {
+                    "status": "ERROR", "records": [],
+                    "warnings": [str(exc)], "file_name": fname,
+                }
         else:
             result = _fallback_parse(fb, fname, sub_hint)
 
-        if result.get("status") == "ERROR":
-            for w in result.get("warnings", []):
+        # ── Retry with fallback when primary parser produced no records ────────
+        # This fixes files that share the same physical structure as sibling
+        # files in the same batch but whose specific column header text scores
+        # below the alias threshold (e.g. a subject file with a slightly
+        # different heading row layout).
+        if not result.get("records") and _PARSER_OK:
+            fb_result = _fallback_parse(fb, fname, sub_hint)
+            if fb_result.get("records"):
+                result = fb_result   # fallback found student rows — use them
+
+        # ── Only surface warnings that are meaningful to the user ─────────────
+        user_warnings = [w for w in result.get("warnings", []) if _is_user_facing(w)]
+
+        if result.get("status") == "ERROR" and not result.get("records"):
+            for w in user_warnings:
                 st.error(f"**{fname}**: {w}", icon="🚫")
+            file_records[fname] = []
+            file_dfs[fname]     = pd.DataFrame(columns=EDITOR_COLS)
         else:
-            for w in result.get("warnings", []):
+            for w in user_warnings:
                 st.warning(f"**{fname}**: {w}", icon="⚠️")
-            combined.extend(result.get("records", []))
+            recs = result.get("records", [])
+            file_records[fname] = recs
+            file_dfs[fname]     = records_to_df(recs)
 
-    st.session_state.sem_records[sem] = combined
-    st.session_state.sem_dfs[sem]     = records_to_df(combined)
+    if "sem_file_records" not in st.session_state:
+        st.session_state.sem_file_records = {}
+    if "sem_file_dfs" not in st.session_state:
+        st.session_state.sem_file_dfs = {}
+
+    st.session_state.sem_file_records[sem] = file_records
+    st.session_state.sem_file_dfs[sem]     = file_dfs
 
 
-def _review_panel(sem: str, idx: int, ordered: list[str]) -> None:
-    # ── Parse once ────────────────────────────────────────────────────────
-    if sem not in st.session_state.sem_records:
-        with st.spinner(f"Parsing {len(st.session_state.semester_groups.get(sem, []))} "
-                        f"file(s) for {sem} …"):
-            _parse_semester(sem)
+def _show_historical_context(sn: int) -> None:
+    """
+    For Semester 2+, query the DB for existing SemesterGPA rows from
+    previous semesters and display them as read-only historical context.
+    CGPA calculation will automatically include these via recompute_cgpa().
+    """
+    if not _CALC_OK:
+        return
+    try:
+        engine = get_engine(st.session_state.db_url)
+        with Session(engine) as sess:
+            prev_sgpas = sess.execute(
+                sa_select(SemesterGPA).where(SemesterGPA.semester < sn)
+            ).scalars().all()
 
-    cur_df   = st.session_state.sem_dfs[sem]
-    expected = EXPECTED_STRENGTH.get(sem, 0)
+        if not prev_sgpas:
+            st.markdown(
+                f'<div class="hist-banner">ℹ️ <b>Historical Data:</b> No Semester 1–{sn-1} '
+                f'data found in the database yet. CGPA for this semester will only include '
+                f'the records you are uploading now.</div>',
+                unsafe_allow_html=True,
+            )
+            return
 
-    # Distinct students (by roll_no) is the real strength measure
-    distinct_rolls = cur_df["roll_no"].dropna().nunique()
+        by_sem: dict[int, list] = {}
+        for sg in prev_sgpas:
+            by_sem.setdefault(sg.semester, []).append(sg)
 
-    # ── A · Strength Gate ─────────────────────────────────────────────────
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="section-label">📚 Historical DB Data — '
+            f'Semesters 1–{sn-1} (read-only · auto-included in CGPA)</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div style="font-size:.82rem;color:#0C4A6E;margin-bottom:12px">'
+            'These GPA values are already stored in the database from a previous session. '
+            'When GPA is calculated for this semester, '
+            '<b>recompute_cgpa()</b> will automatically pool them to produce the '
+            'cumulative CGPA — no re-upload of earlier semesters needed.</div>',
+            unsafe_allow_html=True,
+        )
+
+        hist_cols = st.columns(min(len(by_sem), 4))
+        for i, (prev_sn, sgpa_list) in enumerate(sorted(by_sem.items())):
+            valid_gpas = [sg.gpa for sg in sgpa_list if sg.gpa is not None]
+            avg_gpa    = sum(valid_gpas) / len(valid_gpas) if valid_gpas else None
+            hist_cols[i % 4].markdown(f"""<div class="kpi-box">
+                <div class="kpi-value" style="font-size:1.6rem">
+                    {f"{avg_gpa:.2f}" if avg_gpa else "—"}
+                </div>
+                <div class="kpi-label">Sem {prev_sn} Avg GPA</div>
+                <div style="font-size:.72rem;color:#94A3B8;margin-top:4px">
+                    {len(sgpa_list)} student record(s) in DB
+                </div></div>""", unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    except Exception:
+        pass
+
+
+def _review_tab_panel(sem: str) -> None:
+    """
+    Full review panel for one semester, shown inside its st.tab().
+
+    Layout:
+      A · Student Strength Verification
+      B · Historical Context  (Semester 2+ only)
+      C · Per-File Validation + Editor
+      D · Approve button
+    """
+    is_approved = st.session_state.approvals.get(sem, False)
+    sn          = sem_num(sem)
+
+    if is_approved:
+        st.markdown(
+            f'<div class="banner banner-success">✅ {sem} is approved and ready '
+            f'for GPA calculation.</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(f"🔓 Re-open {sem} for editing", key=f"reopen_{sem}"):
+            st.session_state.approvals[sem] = False
+            st.rerun()
+        return
+
+    files_for_sem = st.session_state.semester_groups.get(sem, [])
+
+    # ── Parse files once (per session) ────────────────────────────────────────
+    if sem not in st.session_state.get("sem_file_records", {}):
+        with st.spinner(f"Parsing {len(files_for_sem)} file(s) for {sem}…"):
+            _parse_semester_files(sem)
+
+    file_records = st.session_state.sem_file_records.get(sem, {})
+    file_dfs     = st.session_state.sem_file_dfs.get(sem, {})
+
+    # ── A · Student Strength ───────────────────────────────────────────────────
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">A · Student Strength Verification</div>',
                 unsafe_allow_html=True)
 
+    all_rolls: set[str] = set()
+    for recs in file_records.values():
+        for r in recs:
+            roll = str(r.get("roll_no") or "").strip()
+            if roll:
+                all_rolls.add(roll)
+
+    expected       = EXPECTED_STRENGTH.get(sem, 0)
+    distinct_rolls = len(all_rolls)
+    total_rows     = sum(len(recs) for recs in file_records.values())
+
     k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(f"""<div class="kpi-box">
-        <div class="kpi-value">{expected}</div>
+    k1.markdown(f"""<div class="kpi-box"><div class="kpi-value">{expected}</div>
         <div class="kpi-label">Expected</div></div>""", unsafe_allow_html=True)
-    k2.markdown(f"""<div class="kpi-box">
-        <div class="kpi-value">{distinct_rolls}</div>
+    k2.markdown(f"""<div class="kpi-box"><div class="kpi-value">{distinct_rolls}</div>
         <div class="kpi-label">Distinct Students</div></div>""", unsafe_allow_html=True)
-    k3.markdown(f"""<div class="kpi-box">
-        <div class="kpi-value">{len(cur_df)}</div>
-        <div class="kpi-label">Total Rows</div></div>""", unsafe_allow_html=True)
-    k4.markdown(f"""<div class="kpi-box">
-        <div class="kpi-value">{len(st.session_state.semester_groups.get(sem, []))}</div>
+    k3.markdown(f"""<div class="kpi-box"><div class="kpi-value">{len(files_for_sem)}</div>
         <div class="kpi-label">Subject Files</div></div>""", unsafe_allow_html=True)
+    k4.markdown(f"""<div class="kpi-box"><div class="kpi-value">{total_rows}</div>
+        <div class="kpi-label">Total Mark Rows</div></div>""", unsafe_allow_html=True)
 
     strength_locked = distinct_rolls < expected
     if strength_locked:
         st.markdown(
-            f'<div class="banner banner-critical">🚨 CRITICAL STRENGTH DISCREPANCY — '
-            f'Expected <b>{expected}</b> students but found only <b>{distinct_rolls}</b> '
-            f'distinct roll numbers. Add the missing <b>{expected - distinct_rolls}</b> '
-            f'row(s) in the data grid below before approving.</div>',
+            f'<div class="banner banner-critical">🚨 Expected <b>{expected}</b> students '
+            f'but found <b>{distinct_rolls}</b> distinct roll numbers. '
+            f'Add the missing <b>{expected - distinct_rolls}</b> student(s) in the '
+            f'file editors below before approving.</div>',
             unsafe_allow_html=True,
         )
     elif distinct_rolls == expected:
         st.markdown(
-            '<div class="banner banner-success">✅ Student count matches the '
-            'expected strength perfectly.</div>',
+            '<div class="banner banner-success">✅ Student count matches expected '
+            'strength perfectly.</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
             f'<div class="banner banner-warning">⚠️ {distinct_rolls - expected} extra '
-            f'student(s) found vs expected strength. Verify no duplicate entries.</div>',
+            f'student(s) vs expected — verify no duplicates.</div>',
             unsafe_allow_html=True,
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── B · Automated Validation ───────────────────────────────────────────
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">B · Automated Validation Results</div>',
-                unsafe_allow_html=True)
+    # ── B · Historical Context (Semester 2+) ──────────────────────────────────
+    if sn > 1:
+        _show_historical_context(sn)
 
-    live_records = df_to_records(cur_df)
-    has_blocked  = True
+    # ── C · Per-File Validation + Editor ──────────────────────────────────────
+    # KEY DESIGN: the editor key is computed FIRST so we can call
+    # _apply_editor_edits() BEFORE rendering the widget.  Streamlit writes the
+    # user's latest edits into st.session_state[key] before re-running the
+    # script, so reading it here gives the CURRENT state — not the previous
+    # render's state.  This eliminates the one-render lag where filling in a
+    # credit_hours cell still shows EC-09 BLOCKED on the same interaction.
+    any_blocked = False
 
-    if not _VALIDATOR_OK:
-        st.error("validation_agent could not be imported — fix the module error in the sidebar.", icon="🚫")
-    else:
-        try:
-            report      = validate_records(live_records, semester=sem)
-            has_blocked = report.status == "BLOCKED"
-            _render_validation(report)
-            st.session_state.val_reports[sem] = report.model_dump()
-        except Exception as exc:
-            st.error(f"Validation engine error: {exc}", icon="🚫")
+    for fname in files_for_sem:
+        recs = file_records.get(fname, [])
+        df   = file_dfs.get(fname, pd.DataFrame(columns=EDITOR_COLS))
 
-    st.markdown('</div>', unsafe_allow_html=True)
+        editor_key = f"editor_{_safe_key(sem)}_{_safe_key(fname)}"
 
-    # ── C · Data Editor ───────────────────────────────────────────────────
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-label">C · Mark Sheet Data Editor</div>',
-                unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="file-section">'
+            f'<div class="file-section-header">📄 {fname}</div>',
+            unsafe_allow_html=True,
+        )
 
-    file_list = st.session_state.semester_groups.get(sem, [])
-    st.caption(
-        f"Combined from {len(file_list)} file(s): "
-        + ", ".join(f"`{f}`" for f in file_list)
-        + "  ·  Edit cells or add rows directly. Click **Re-Validate** to refresh."
-    )
+        # Apply any pending editor edits to df BEFORE validation
+        current_df = _apply_editor_edits(df, editor_key) if not df.empty else df
+        live_recs  = df_to_records(current_df) if not current_df.empty else recs
 
-    edited_df: pd.DataFrame = st.data_editor(
-        st.session_state.sem_dfs[sem],
-        key               = f"editor_{sem}",
-        use_container_width=True,
-        num_rows          = "dynamic",
-        hide_index        = True,
-        column_config={
-            "student_name"  : st.column_config.TextColumn("Student Name",  required=True, width="medium"),
-            "roll_no"       : st.column_config.TextColumn("Roll No",       required=True, width="medium"),
-            "father_name"   : st.column_config.TextColumn("Father Name",                 width="medium"),
-            "subject_name"  : st.column_config.TextColumn("Subject",       required=True, width="medium"),
-            "total_marks"   : st.column_config.NumberColumn("Total Marks", min_value=0, format="%.1f", width="small"),
-            "obtained_marks": st.column_config.NumberColumn("Obtained",    min_value=0, format="%.1f", width="small"),
-            "credit_hours"  : st.column_config.NumberColumn("Cr. Hrs",     min_value=0, step=1, format="%d", width="small"),
-            "department"    : st.column_config.TextColumn("Dept",                        width="small"),
-        },
-    )
-    st.session_state.sem_dfs[sem] = edited_df
-    st.markdown('</div>', unsafe_allow_html=True)
+        if not live_recs:
+            st.warning(
+                f"No valid student rows found in **{fname}**. "
+                f"The file may use column names not yet in the alias list — "
+                f"check that subject, roll no, total marks and obtained marks "
+                f"columns are present.",
+                icon="⚠️",
+            )
+            any_blocked = True
+        elif _VALIDATOR_OK:
+            try:
+                report = validate_records(live_recs, semester=sem)
+                if report.status == "BLOCKED":
+                    any_blocked = True
+                _render_validation(report)
+            except Exception as exc:
+                st.error(f"Validation engine error for {fname}: {exc}", icon="🚫")
+                any_blocked = True
+        else:
+            st.error(
+                "validation_agent could not be imported — fix the module error in the sidebar.",
+                icon="🚫",
+            )
+            any_blocked = True
 
-    # ── D · Controls ──────────────────────────────────────────────────────
-    can_approve = (not has_blocked) and (not strength_locked)
+        if not df.empty:
+            edited_df = st.data_editor(
+                df,
+                key                = editor_key,
+                use_container_width= True,
+                num_rows           = "dynamic",
+                hide_index         = True,
+                column_config={
+                    "student_name"  : st.column_config.TextColumn("Student Name", width="medium"),
+                    "roll_no"       : st.column_config.TextColumn("Roll No",      width="medium"),
+                    "father_name"   : st.column_config.TextColumn("Father Name",  width="medium"),
+                    "subject_name"  : st.column_config.TextColumn("Subject",      width="medium"),
+                    "total_marks"   : st.column_config.NumberColumn("Total",   min_value=0, format="%.1f", width="small"),
+                    "obtained_marks": st.column_config.NumberColumn("Obtained",min_value=0, format="%.1f", width="small"),
+                    "credit_hours"  : st.column_config.NumberColumn("Cr. Hrs", min_value=0, step=1, format="%d", width="small"),
+                    "department"    : st.column_config.TextColumn("Dept",         width="small"),
+                },
+            )
+            st.session_state.sem_file_dfs[sem][fname] = edited_df
+        else:
+            st.info("Editor unavailable — file produced no parseable records.", icon="ℹ️")
 
-    b1, b2, b3 = st.columns([2, 2, 4])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── D · Approve Button ─────────────────────────────────────────────────────
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    can_approve = not any_blocked and not strength_locked
+
+    b1, b2 = st.columns([3, 1])
     with b1:
-        if st.button("🔄 Re-Validate", use_container_width=True, key=f"reval_{sem}"):
-            st.rerun()
-    with b2:
-        if st.button("✅ Approve Semester", type="primary",
-                     disabled=not can_approve, use_container_width=True,
-                     key=f"approve_{sem}"):
-            _approve(sem, edited_df, idx, ordered)
-    with b3:
         if not can_approve:
             reasons = []
-            if has_blocked:    reasons.append("resolve all 🔴 BLOCKED errors")
+            if any_blocked:     reasons.append("resolve all 🔴 BLOCKED errors")
             if strength_locked: reasons.append(f"add {expected - distinct_rolls} missing student(s)")
             st.markdown(
                 f'<div class="banner banner-info" style="margin:0">🔒 '
@@ -939,6 +4772,29 @@ def _review_panel(sem: str, idx: int, ordered: list[str]) -> None:
                 '🔓 No blockers — ready to approve.</div>',
                 unsafe_allow_html=True,
             )
+    with b2:
+        if st.button(
+            f"✅ Approve {sem}",
+            type             = "primary",
+            disabled         = not can_approve,
+            use_container_width= True,
+            key              = f"approve_{sem}",
+        ):
+            _approve_semester(sem)
+
+
+def _approve_semester(sem: str) -> None:
+    """
+    Combine all per-file edited records for *sem* into sem_records[sem]
+    (used by the calculator), then mark the semester as approved.
+    """
+    file_dfs = st.session_state.sem_file_dfs.get(sem, {})
+    combined: list[dict] = []
+    for df in file_dfs.values():
+        combined.extend(df_to_records(df))
+    st.session_state.sem_records[sem] = combined
+    st.session_state.approvals[sem]   = True
+    st.rerun()
 
 
 def _render_validation(report: Any) -> None:
@@ -948,18 +4804,15 @@ def _render_validation(report: Any) -> None:
         "BLOCKED": ("banner-critical","🚫 Critical issues must be fixed before approval."),
     }
     cls, msg = status_map.get(report.status, ("banner-info", ""))
-
-    # Status bar
     st.markdown(f"""
     <div class="banner {cls}">
         <div style="flex:1">{msg}</div>
-        <div style="display:flex;gap:12px;font-size:0.8rem">
+        <div style="display:flex;gap:12px;font-size:.8rem">
             <span class="badge badge-clean">✓ {report.summary.clean} clean</span>
             <span class="badge badge-flagged">⚠ {report.summary.flagged} flagged</span>
             <span class="badge badge-blocked">✗ {report.summary.blocked} blocked</span>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     if not report.flagged_rows:
         return
@@ -973,34 +4826,19 @@ def _render_validation(report: Any) -> None:
             for r in blocked:
                 st.error(
                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
-                    f"**{r.error_code}**: {r.error_message}",
-                    icon="🚫",
-                )
+                    f"**{r.error_code}**: {r.error_message}", icon="🚫")
     if flagged:
         with st.expander(f"🟡 FLAGGED Warnings — {len(flagged)} (review recommended)"):
             for r in flagged:
                 st.warning(
                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
-                    f"**{r.error_code}**: {r.error_message}",
-                    icon="⚠️",
-                )
+                    f"**{r.error_code}**: {r.error_message}", icon="⚠️")
     if info:
         with st.expander(f"🔵 INFO Notes — {len(info)} (non-credit subjects)"):
             for r in info:
                 st.info(
                     f"**Row {r.row_index}** · `{r.roll_no or 'NO ROLL'}` · "
-                    f"**{r.error_code}**: {r.error_message}",
-                    icon="ℹ️",
-                )
-
-
-def _approve(sem: str, df: pd.DataFrame, idx: int, ordered: list[str]) -> None:
-    st.session_state.sem_records[sem] = df_to_records(df)
-    st.session_state.approvals[sem]   = True
-    st.session_state.review_idx       = idx + 1
-    if st.session_state.review_idx >= len(ordered):
-        st.session_state.stage = "calculate"
-    st.rerun()
+                    f"**{r.error_code}**: {r.error_message}", icon="ℹ️")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1010,60 +4848,99 @@ def _approve(sem: str, df: pd.DataFrame, idx: int, ordered: list[str]) -> None:
 def render_calculate() -> None:
     st.markdown('<div class="stage-title">⚙️ Running GPA Calculation Engine</div>',
                 unsafe_allow_html=True)
-    st.markdown('<div class="stage-subtitle">Processing all approved semester records '
-                'through the HEC Pakistan GPA formula.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="stage-subtitle">'
+        'Processing approved semesters <b>in order</b> (Semester 1 first). '
+        'Each semester\'s SemesterGPA is saved to the DB before the next semester '
+        'is processed — so CGPA at each step automatically includes all historical '
+        'data (including records from previous upload sessions).</div>',
+        unsafe_allow_html=True,
+    )
 
-    approved = [s for s in st.session_state.ordered_sems
-                if st.session_state.approvals.get(s)]
+    approved = sorted(
+        [s for s in st.session_state.ordered_sems if st.session_state.approvals.get(s)],
+        key=sem_num,
+    )
 
     if not approved:
         st.error("No approved semesters. Return to review.", icon="🚫")
         if st.button("← Back to Review"):
-            st.session_state.stage      = "review"
-            st.session_state.review_idx = 0
+            st.session_state.stage = "review"
             st.rerun()
         return
 
-    c1, c2, c3 = st.columns(3)
     total_recs = sum(len(st.session_state.sem_records.get(s, [])) for s in approved)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Approved Semesters", len(approved))
     c2.metric("Total Records",      total_recs)
-    c3.metric("Distinct Subjects",
-              len({r.get("subject_name") for s in approved
-                   for r in st.session_state.sem_records.get(s, [])
-                   if r.get("subject_name")}))
+    c3.metric("Processing Order",   " → ".join(f"Sem {sem_num(s)}" for s in approved))
 
     if not _CALC_OK:
         st.error("calculator_agent could not be imported. Fix import errors in sidebar.", icon="🚫")
         return
 
-    all_records: list[dict] = []
-    for sem in approved:
+    agg: dict[str, Any] = {
+        "marks_written": 0, "semester_gpas": [], "cgpas": [], "errors": [],
+    }
+
+    progress_bar = st.progress(0, text="Starting…")
+    status_area  = st.empty()
+
+    for step_i, sem in enumerate(approved):
         sn = sem_num(sem)
         ay = infer_academic_year(sn)
+
+        status_area.markdown(
+            f'<div class="banner banner-info">⚙️ Processing <b>{sem}</b> '
+            f'(academic year {ay})…</div>',
+            unsafe_allow_html=True,
+        )
+
+        sem_recs: list[dict] = []
         for rec in st.session_state.sem_records.get(sem, []):
             e = dict(rec)
             e["semester"]      = sn
             e["academic_year"] = ay
-            all_records.append(e)
+            sem_recs.append(e)
 
-    with st.spinner("Calculating GPA and CGPA for all approved records …"):
+        if not sem_recs:
+            st.warning(f"No records found for {sem} — skipping.", icon="⚠️")
+            progress_bar.progress((step_i + 1) / len(approved))
+            continue
+
         try:
             out = calculator_agent_node({
-                "validated_records": all_records,
-                "semester"         : sem_num(approved[0]),
-                "academic_year"    : infer_academic_year(sem_num(approved[0])),
+                "validated_records": sem_recs,
+                "semester"         : sn,
+                "academic_year"    : ay,
                 "db_url"           : st.session_state.db_url,
                 "approved_by"      : "HOD",
                 "source_file"      : "dashboard_upload",
                 "errors"           : [],
             })
-            st.session_state.calc_results = out
-            st.session_state.stage        = "results"
-            st.rerun()
+            agg["marks_written"] += out.get("marks_written", 0)
+            agg["semester_gpas"].extend(out.get("semester_gpas", []))
+            for new_cgpa in out.get("cgpas", []):
+                agg["cgpas"] = [
+                    c for c in agg["cgpas"]
+                    if c["student_id"] != new_cgpa["student_id"]
+                ]
+                agg["cgpas"].append(new_cgpa)
+            agg["errors"].extend(out.get("errors", []))
         except Exception as exc:
-            st.error(f"Calculation engine error: {exc}", icon="🚫")
-            st.exception(exc)
+            st.error(f"Error calculating {sem}: {exc}", icon="🚫")
+            agg["errors"].append({"roll_no": None, "reason": f"{sem}: {exc}"})
+
+        progress_bar.progress((step_i + 1) / len(approved))
+
+    status_area.markdown(
+        '<div class="banner banner-success">✅ All semesters processed successfully.</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.session_state.calc_results = agg
+    st.session_state.stage        = "results"
+    st.rerun()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1073,8 +4950,11 @@ def render_calculate() -> None:
 def render_results() -> None:
     st.markdown('<div class="stage-title">📊 GPA Results & Final Approval</div>',
                 unsafe_allow_html=True)
-    st.markdown('<div class="stage-subtitle">Review the progressive GPA table carefully '
-                'before committing to the database.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="stage-subtitle">Review the per-subject GPA breakdown and the '
+        'progressive CGPA table before committing to the database.</div>',
+        unsafe_allow_html=True,
+    )
 
     res           = st.session_state.calc_results or {}
     marks_written = res.get("marks_written", 0)
@@ -1082,12 +4962,11 @@ def render_results() -> None:
     cgpas         = res.get("cgpas", [])
     errors        = res.get("errors", [])
 
-    # ── Top metrics ────────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Records Written",     marks_written)
-    m2.metric("Semester GPAs",       len(sem_gpas))
-    m3.metric("Students (CGPA)",     len(cgpas))
-    m4.metric("Errors",              len(errors),
+    m1.metric("Records Written", marks_written)
+    m2.metric("Semester GPAs",   len(sem_gpas))
+    m3.metric("Students (CGPA)", len(cgpas))
+    m4.metric("Errors",          len(errors),
               delta=f"{len(errors)} errors" if errors else None,
               delta_color="inverse" if errors else "off")
 
@@ -1096,14 +4975,43 @@ def render_results() -> None:
             for e in errors:
                 st.error(f"`{e.get('roll_no','N/A')}` — {e.get('reason','unknown')}", icon="🚫")
 
-    # ── Progressive GPA Table ─────────────────────────────────────────────
+    # ── Per-Subject GPA Breakdown ──────────────────────────────────────────────
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Per-Subject GPA Breakdown</div>',
+                unsafe_allow_html=True)
+
+    subj_df = _build_subject_gpa_df()
+    if not subj_df.empty:
+        st.dataframe(
+            subj_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "GPA": st.column_config.NumberColumn("Grade Point", format="%.2f"),
+                "%":   st.column_config.NumberColumn("Percentage",  format="%.1f%%"),
+            },
+        )
+        buf_subj = io.StringIO()
+        subj_df.to_csv(buf_subj, index=False)
+        st.download_button(
+            "⬇ Download Per-Subject Report (CSV)",
+            data=buf_subj.getvalue(),
+            file_name=f"subject_gpa_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No subject-level data found in the database for the processed semesters.", icon="ℹ️")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Progressive GPA Table ──────────────────────────────────────────────────
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Progressive Semester GPA & Cumulative CGPA</div>',
                 unsafe_allow_html=True)
     st.markdown(
-        '<div style="font-size:0.8rem;color:#64748B;margin-bottom:14px">'
+        '<div style="font-size:.8rem;color:#64748B;margin-bottom:14px">'
         'CGPA = Σ Quality Points ÷ Σ Credit Hours (HEC Pakistan standard — '
-        'never an average of GPA values)</div>',
+        'never an average of GPA values). Includes all historical semesters from DB.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1112,31 +5020,31 @@ def render_results() -> None:
     prog_html = _build_progressive_html(approved_sems)
     st.markdown(prog_html, unsafe_allow_html=True)
 
-    # Download
     prog_df = _build_progressive_df_for_export(approved_sems)
     if not prog_df.empty:
         buf = io.StringIO()
         prog_df.to_csv(buf, index=False)
         st.download_button(
-            "⬇ Download GPA Report (CSV)",
+            "⬇ Download Progressive GPA Report (CSV)",
             data      = buf.getvalue(),
             file_name = f"gpa_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime      = "text/csv",
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Final decision ─────────────────────────────────────────────────────
+    # ── Final Decision ─────────────────────────────────────────────────────────
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Final Decision</div>', unsafe_allow_html=True)
 
     if st.session_state.final_saved:
         st.markdown(
             '<div class="banner banner-success">💾 Results approved and permanently '
-            'saved to the database. The HOD sign-off has been recorded.</div>',
+            'saved to the database. HOD sign-off recorded.</div>',
             unsafe_allow_html=True,
         )
         if st.button("🔄 Start New Batch", use_container_width=True):
-            _reset(); st.rerun()
+            _reset()
+            st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
@@ -1144,35 +5052,72 @@ def render_results() -> None:
     with col_save:
         if st.button("💾 Approve & Save Permanently to Database",
                      type="primary", use_container_width=True):
-            # Calculator already committed; this records HOD sign-off
             st.session_state.final_saved = True
             st.success("✅ HOD approval recorded. Results saved.", icon="✅")
             st.rerun()
     with col_reject:
-        if st.button("🛑 Report Calculation Error / Reject",
+        if st.button("🛑 Report Error / Reject Results",
                      type="secondary", use_container_width=True):
             st.session_state.calc_results = None
             st.session_state.approvals    = {}
-            st.session_state.review_idx   = 0
             st.session_state.stage        = "review"
-            st.warning("Results rejected. All approvals cleared — please re-review.", icon="⚠️")
+            st.warning("Results rejected. Re-review all semesters.", icon="⚠️")
             st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-def _build_progressive_html(approved_sems: list[str]) -> str:
-    """Build an HTML progressive GPA table from the DB (or in-memory fallback)."""
+# ──────────────────────────────────────────────────────────────────────────────
+# RESULT BUILDERS
+# ──────────────────────────────────────────────────────────────────────────────
 
+def _build_subject_gpa_df() -> pd.DataFrame:
+    if not _CALC_OK:
+        return pd.DataFrame()
+    try:
+        engine = get_engine(st.session_state.db_url)
+        with Session(engine) as sess:
+            marks_list   = sess.execute(sa_select(Mark)).scalars().all()
+            students_map = {s.id: s for s in sess.execute(sa_select(Student)).scalars().all()}
+            subjects_map = {s.id: s for s in sess.execute(sa_select(Subject)).scalars().all()}
+
+        rows = []
+        for m in marks_list:
+            stu = students_map.get(m.student_id)
+            sub = subjects_map.get(m.subject_id)
+            if not stu or not sub:
+                continue
+            rows.append({
+                "Roll No"     : stu.roll_no,
+                "Student Name": stu.student_name,
+                "Semester"    : m.semester,
+                "Subject"     : sub.subject_name,
+                "Cr. Hrs"     : sub.credit_hours,
+                "Obtained"    : m.obtained_marks,
+                "Total"       : m.total_marks,
+                "%"           : round(m.percentage, 1),
+                "GPA"         : m.grade_point,
+                "Quality Pts" : m.quality_points,
+            })
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df.sort_values(["Semester", "Roll No", "Subject"], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    except Exception:
+        return pd.DataFrame()
+
+
+def _build_progressive_html(approved_sems: list[str]) -> str:
     def _gpa_cell(val: float | None) -> str:
         if val is None:
             return '<td class="gpa-dash">—</td>'
-        cls = ("gpa-high" if val >= 3.50 else
-               "gpa-mid"  if val >= 2.50 else "gpa-low")
+        cls = ("gpa-high" if val >= 3.50 else "gpa-mid" if val >= 2.50 else "gpa-low")
         return f'<td class="{cls}">{val:.2f}</td>'
 
-    sem_nums = sorted(sem_num(s) for s in approved_sems)
-
-    # ── Try DB query ──────────────────────────────────────────────────────
     rows_data: list[dict] = []
     try:
         if _CALC_OK:
@@ -1187,11 +5132,15 @@ def _build_progressive_html(approved_sems: list[str]) -> str:
                 sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
             cgpa_map = {c.student_id: c for c in all_cgpas}
 
+            all_sem_nums = sorted({sg.semester for sg in all_sgpas})
+            if not all_sem_nums:
+                all_sem_nums = sorted(sem_num(s) for s in approved_sems)
+
             for stu in students:
                 row: dict = {"name": stu.student_name, "roll": stu.roll_no,
                              "dept": stu.department or ""}
                 running_qp = running_ch = 0.0
-                for sn in sem_nums:
+                for sn in all_sem_nums:
                     sg = sgpa_map.get(stu.id, {}).get(sn)
                     row[f"gpa_{sn}"] = sg.gpa if sg else None
                     if sg:
@@ -1201,9 +5150,10 @@ def _build_progressive_html(approved_sems: list[str]) -> str:
                                          if running_ch > 0 else None)
                 final = cgpa_map.get(stu.id)
                 row["final_cgpa"] = final.cgpa if final else None
+                row["_sem_nums"]  = all_sem_nums
                 rows_data.append(row)
     except Exception:
-        # fall back to in-memory
+        all_sem_nums = sorted(sem_num(s) for s in approved_sems)
         res = st.session_state.calc_results or {}
         sgpa_mem: dict[int, dict[int, dict]] = {}
         for sg in res.get("semester_gpas", []):
@@ -1212,22 +5162,23 @@ def _build_progressive_html(approved_sems: list[str]) -> str:
         for sid in sorted(sgpa_mem):
             row = {"name": f"Student {sid}", "roll": "—", "dept": ""}
             rqp = rch = 0.0
-            for sn in sem_nums:
-                sg = sgpa_mem.get(sid, {}).get(sn, {})
+            for sn in all_sem_nums:
+                sg  = sgpa_mem.get(sid, {}).get(sn, {})
                 gpa = sg.get("gpa")
-                row[f"gpa_{sn}"] = gpa
+                row[f"gpa_{sn}"]  = gpa
                 rch += sg.get("total_credit_hours", 0) or 0
                 rqp += sg.get("total_quality_points", 0) or 0
                 row[f"cgpa_{sn}"] = round(rqp / rch, 2) if rch > 0 else None
             fc = cgpa_mem.get(sid, {})
             row["final_cgpa"] = fc.get("cgpa")
+            row["_sem_nums"]  = all_sem_nums
             rows_data.append(row)
 
     if not rows_data:
         return '<div class="banner banner-warning">No student data found in the database.</div>'
 
-    # ── Build HTML ────────────────────────────────────────────────────────
-    # Header
+    sem_nums = rows_data[0].get("_sem_nums", [])
+
     th = "<tr><th>Student Name</th><th>Roll No</th><th>Dept</th>"
     for sn in sem_nums:
         th += f"<th>Sem {sn} GPA</th><th>CGPA (1–{sn})</th>"
@@ -1244,38 +5195,43 @@ def _build_progressive_html(approved_sems: list[str]) -> str:
         body += _gpa_cell(r.get("final_cgpa"))
         body += "</tr>"
 
-    return (f'<div style="overflow-x:auto">'
-            f'<table class="gpa-table"><thead>{th}</thead><tbody>{body}</tbody></table>'
-            f'</div>'
-            f'<div style="margin-top:10px;font-size:0.75rem;color:#94A3B8">'
-            f'🟢 ≥ 3.50 Excellent &nbsp;|&nbsp; '
-            f'🟡 2.50 – 3.49 Good &nbsp;|&nbsp; '
-            f'🔴 &lt; 2.50 At Risk</div>')
+    return (
+        f'<div style="overflow-x:auto">'
+        f'<table class="gpa-table"><thead>{th}</thead><tbody>{body}</tbody></table>'
+        f'</div>'
+        f'<div style="margin-top:10px;font-size:.75rem;color:#94A3B8">'
+        f'🟢 ≥ 3.50 Excellent &nbsp;|&nbsp; '
+        f'🟡 2.50 – 3.49 Good &nbsp;|&nbsp; '
+        f'🔴 &lt; 2.50 At Risk</div>'
+    )
 
 
 def _build_progressive_df_for_export(approved_sems: list[str]) -> pd.DataFrame:
-    """Plain DataFrame for CSV export."""
-    sem_nums = sorted(sem_num(s) for s in approved_sems)
-    rows: list[dict] = []
+    if not _CALC_OK:
+        return pd.DataFrame()
     try:
-        if not _CALC_OK:
-            raise RuntimeError("calc not available")
         engine = get_engine(st.session_state.db_url)
         with Session(engine) as sess:
             students  = sess.execute(sa_select(Student)).scalars().all()
             all_sgpas = sess.execute(sa_select(SemesterGPA)).scalars().all()
             all_cgpas = sess.execute(sa_select(CGPA)).scalars().all()
+
         sgpa_map: dict[int, dict[int, Any]] = {}
         for sg in all_sgpas:
             sgpa_map.setdefault(sg.student_id, {})[sg.semester] = sg
         cgpa_map = {c.student_id: c for c in all_cgpas}
+
+        all_sem_nums = sorted({sg.semester for sg in all_sgpas}
+                              or {sem_num(s) for s in approved_sems})
+
+        rows = []
         for stu in students:
             row = {"Student Name": stu.student_name, "Roll No": stu.roll_no,
                    "Department": stu.department or ""}
             rqp = rch = 0.0
-            for sn in sem_nums:
+            for sn in all_sem_nums:
                 sg = sgpa_map.get(stu.id, {}).get(sn)
-                row[f"Sem {sn} GPA"]    = f"{sg.gpa:.2f}"  if (sg and sg.gpa)  else "—"
+                row[f"Sem {sn} GPA"] = f"{sg.gpa:.2f}" if (sg and sg.gpa) else "—"
                 if sg:
                     rch += sg.total_credit_hours or 0
                     rqp += sg.total_quality_points or 0
@@ -1283,13 +5239,14 @@ def _build_progressive_df_for_export(approved_sems: list[str]) -> pd.DataFrame:
             fc = cgpa_map.get(stu.id)
             row["Final CGPA"] = f"{fc.cgpa:.2f}" if (fc and fc.cgpa) else "—"
             rows.append(row)
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
     except Exception:
-        pass
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+        return pd.DataFrame()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FALLBACK PARSER  (when parser_agent can't be imported)
+# FALLBACK PARSER  (when parser_agent cannot be imported)
 # ──────────────────────────────────────────────────────────────────────────────
 _FALIAS: dict[str, list[str]] = {
     "student_name"  : ["student name","name","student","sname"],
@@ -1301,25 +5258,11 @@ _FALIAS: dict[str, list[str]] = {
     "credit_hours"  : ["credit hours","credits","ch","credit_hours"],
     "department"    : ["department","dept","program"],
 }
-
-_SEM_RE = [
-    (re.compile(r"^[Ss](\d)\b"),              1),
-    (re.compile(r"\bSem(?:ester)?[\s_-]?(\d)", re.I), 1),
-    (re.compile(r"(\d)(?:st|nd|rd|th)\b", re.I),      1),
-]
-
-
-def _fallback_detect(filename: str) -> tuple[str | None, str | None]:
-    stem = Path(filename).stem
-    for pat, grp in _SEM_RE:
-        m = pat.search(stem)
-        if m:
-            n = int(m.group(grp))
-            if 1 <= n <= 8:
-                rest = stem[m.end():].lstrip("-_ ")
-                sub  = rest or None
-                return f"Semester {n}", sub
-    return None, None
+_FOOTER_KWS_FB = frozenset({
+    "signature","teacher","head","principal","controller",
+    "examiner","lecturer","dean","chairman","coordinator",
+    "prepared by","checked by","approved by","seal",
+})
 
 
 def _fallback_parse(file_bytes: bytes, filename: str,
@@ -1332,18 +5275,19 @@ def _fallback_parse(file_bytes: bytes, filename: str,
                   if ext == ".csv"
                   else pd.read_excel(buf, header=None, dtype=str, engine="openpyxl"))
     except Exception as exc:
-        return {"file_name": filename, "status": "ERROR", "records": [],
-                "warnings": [str(exc)]}
+        return {"file_name": filename, "status": "ERROR", "records": [], "warnings": [str(exc)]}
 
-    # simple header detect
     alias_words = {w for a_list in _FALIAS.values() for a in a_list for w in a.split()}
     best, score = 0, -1
-    for i in range(min(10, len(df_raw))):
+    for i in range(min(25, len(df_raw))):
         words = {w for v in df_raw.iloc[i].values if pd.notna(v)
                  for w in str(v).strip().lower().split()}
         s = len(words & alias_words)
         if s > score:
             score, best = s, i
+    if score < 2:
+        best = 0
+
     buf = _io.BytesIO(file_bytes)
     try:
         df = (pd.read_csv(buf, header=best, dtype=str)
@@ -1351,7 +5295,19 @@ def _fallback_parse(file_bytes: bytes, filename: str,
               else pd.read_excel(buf, header=best, dtype=str, engine="openpyxl"))
     except Exception:
         return {"file_name": filename, "status": "ERROR", "records": [], "warnings": []}
+
     df.dropna(how="all", inplace=True)
+    end_idx = len(df)
+    for i in range(len(df) - 1, -1, -1):
+        row = df.iloc[i]
+        nn = [str(v).strip() for v in row.values
+              if pd.notna(v) and str(v).strip().lower() not in ("","nan","none")]
+        if not nn:
+            end_idx = i; continue
+        if any(kw in " ".join(v.lower() for v in nn) for kw in _FOOTER_KWS_FB):
+            end_idx = i; continue
+        break
+    df = df.iloc[:end_idx].reset_index(drop=True)
 
     n2raw = {re.sub(r"\s+", " ", str(c).strip().lower()): c for c in df.columns}
     cm: dict[str, str] = {}
@@ -1371,7 +5327,7 @@ def _fallback_parse(file_bytes: bytes, filename: str,
                 continue
             all_null = False
             val = str(raw).strip()
-            if field in ("total_marks", "obtained_marks"):
+            if field in ("total_marks","obtained_marks"):
                 try:    rec[field] = float(val)
                 except: rec[field] = val; rec["has_issues"] = True
             elif field == "credit_hours":
@@ -1387,13 +5343,346 @@ def _fallback_parse(file_bytes: bytes, filename: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STUDENT SEARCH  (standalone tab — queries DB directly, no pipeline state)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _gpa_colour(val: float | None) -> str:
+    """Return the CSS class for a GPA/CGPA value cell."""
+    if val is None:
+        return "gpa-dash"
+    if val >= 3.50:
+        return "gpa-high"
+    if val >= 2.50:
+        return "gpa-mid"
+    return "gpa-low"
+
+
+def _grade_letter(gp: float | None) -> str:
+    """Convert a HEC grade point to a letter grade."""
+    if gp is None:
+        return "—"
+    if gp >= 4.00: return "A"
+    if gp >= 3.70: return "A-"
+    if gp >= 3.30: return "B+"
+    if gp >= 3.00: return "B"
+    if gp >= 2.70: return "B-"
+    if gp >= 2.30: return "C+"
+    if gp >= 2.00: return "C"
+    if gp >= 1.70: return "C-"
+    if gp >= 1.00: return "D"
+    return "F"
+
+
+def render_search() -> None:
+    """
+    Full-page student search.
+    Looks up a roll number in the DB and renders:
+      • Student identity card
+      • Subject-level marks for every semester (grade, GP, quality pts)
+      • Per-semester GPA card row
+      • Progressive CGPA timeline
+    All in < 1 second (indexed DB query).
+    """
+    st.markdown('<div class="stage-title">🔍 Student Search</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="stage-subtitle">'
+        'Enter a roll number to instantly view every subject mark, '
+        'per-semester GPA, and cumulative CGPA for that student.</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not _CALC_OK:
+        st.error(
+            "Database module not available — fix the calculator_agent import "
+            "error shown in the sidebar.",
+            icon="🚫",
+        )
+        return
+
+    # ── Search bar ─────────────────────────────────────────────────────────────
+    col_inp, col_btn = st.columns([5, 1])
+    roll_query = col_inp.text_input(
+        "Roll Number",
+        placeholder="e.g. UoL/CS-F-22/001-BS",
+        label_visibility="collapsed",
+        key="search_roll_input",
+    )
+    search_clicked = col_btn.button("Search", type="primary",
+                                    use_container_width=True)
+
+    # Also trigger on Enter (input change without button click)
+    trigger = search_clicked or bool(roll_query and roll_query !=
+                                     st.session_state.get("_last_search_roll"))
+    if roll_query:
+        st.session_state["_last_search_roll"] = roll_query
+
+    if not roll_query.strip():
+        st.markdown("""
+        <div class="upload-zone">
+            <h3>🎓 Roll Number Search</h3>
+            <p>Type a roll number above and press <b>Search</b> (or Enter).<br>
+               Results include every subject, semester GPA, and CGPA instantly.</p>
+        </div>""", unsafe_allow_html=True)
+        return
+
+    # ── DB query ───────────────────────────────────────────────────────────────
+    roll_query = roll_query.strip()
+    try:
+        engine = get_engine(st.session_state.db_url)
+        with Session(engine) as sess:
+            student = sess.execute(
+                sa_select(Student).where(
+                    Student.roll_no.ilike(f"%{roll_query}%")
+                )
+            ).scalars().first()
+
+            if student is None:
+                st.markdown(
+                    f'<div class="banner banner-warning">⚠️ No student found '
+                    f'matching <b>{roll_query}</b>. '
+                    f'Check the roll number and try again.</div>',
+                    unsafe_allow_html=True,
+                )
+                return
+
+            # Fetch all marks, subjects, semester GPAs, CGPA for this student
+            marks    = sess.execute(
+                sa_select(Mark).where(Mark.student_id == student.id)
+                .order_by(Mark.semester, Mark.subject_id)
+            ).scalars().all()
+
+            subjects_map: dict[int, Subject] = {
+                s.id: s for s in sess.execute(sa_select(Subject)).scalars().all()
+            }
+
+            sgpas = sess.execute(
+                sa_select(SemesterGPA)
+                .where(SemesterGPA.student_id == student.id)
+                .order_by(SemesterGPA.semester)
+            ).scalars().all()
+
+            cgpa_row = sess.execute(
+                sa_select(CGPA).where(CGPA.student_id == student.id)
+            ).scalar_one_or_none()
+
+    except Exception as exc:
+        st.error(f"Database error: {exc}", icon="🚫")
+        return
+
+    # ── Identity card ──────────────────────────────────────────────────────────
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    id1, id2, id3, id4 = st.columns(4)
+    id1.markdown(f"""<div class="kpi-box">
+        <div class="kpi-value" style="font-size:1.3rem">{student.student_name}</div>
+        <div class="kpi-label">Student Name</div></div>""",
+        unsafe_allow_html=True)
+    id2.markdown(f"""<div class="kpi-box">
+        <div class="kpi-value" style="font-size:1.1rem">{student.roll_no}</div>
+        <div class="kpi-label">Roll Number</div></div>""",
+        unsafe_allow_html=True)
+    id3.markdown(f"""<div class="kpi-box">
+        <div class="kpi-value" style="font-size:1.3rem">{student.father_name or "—"}</div>
+        <div class="kpi-label">Father Name</div></div>""",
+        unsafe_allow_html=True)
+    id4.markdown(f"""<div class="kpi-box">
+        <div class="kpi-value" style="font-size:1.3rem">{student.department or "—"}</div>
+        <div class="kpi-label">Department</div></div>""",
+        unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if not marks:
+        st.info("No marks recorded yet for this student.", icon="ℹ️")
+        return
+
+    # Group marks by semester
+    by_sem: dict[int, list[Mark]] = {}
+    for m in marks:
+        by_sem.setdefault(m.semester, []).append(m)
+
+    sgpa_by_sem: dict[int, SemesterGPA] = {s.semester: s for s in sgpas}
+    all_sems = sorted(by_sem.keys())
+
+    # ── Running CGPA computation (cumulative, HEC standard) ────────────────────
+    running_qp  = 0.0
+    running_ch  = 0.0
+    cgpa_by_sem: dict[int, float | None] = {}
+    for sn in all_sems:
+        sg = sgpa_by_sem.get(sn)
+        if sg:
+            running_ch += sg.total_credit_hours or 0.0
+            running_qp += sg.total_quality_points or 0.0
+        cgpa_by_sem[sn] = round(running_qp / running_ch, 2) if running_ch > 0 else None
+
+    # ── Per-semester subject tables ────────────────────────────────────────────
+    for sn in all_sems:
+        sem_marks = by_sem[sn]
+        sg        = sgpa_by_sem.get(sn)
+        cgpa_val  = cgpa_by_sem.get(sn)
+
+        st.markdown(
+            f'<div style="font-size:1rem;font-weight:700;color:#0F2444;'
+            f'margin:18px 0 6px 0;display:flex;align-items:center;gap:10px">'
+            f'📚 Semester {sn}'
+            f'<span class="badge badge-info">Academic Year: '
+            f'{sem_marks[0].academic_year}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Subject-level table
+        rows_html = ""
+        for m in sem_marks:
+            sub  = subjects_map.get(m.subject_id)
+            sname = sub.subject_name if sub else f"Subject {m.subject_id}"
+            ch   = sub.credit_hours if sub else 0
+            nc   = "🔵" if m.is_non_credit else ""
+            gp_cls = _gpa_colour(m.grade_point)
+            rows_html += (
+                f"<tr>"
+                f'<td style="text-align:left;font-weight:600;color:#0F2444">'
+                f'{sname} {nc}</td>'
+                f'<td>{ch}</td>'
+                f'<td>{m.total_marks:.0f}</td>'
+                f'<td>{m.obtained_marks:.0f}</td>'
+                f'<td>{m.percentage:.1f}%</td>'
+                f'<td><span class="{gp_cls}" style="padding:3px 10px;'
+                f'border-radius:6px;font-weight:700">'
+                f'{m.grade_point:.2f}</span></td>'
+                f'<td style="font-weight:600">{_grade_letter(m.grade_point)}</td>'
+                f'<td>{m.quality_points:.2f}</td>'
+                f'</tr>'
+            )
+
+        subj_table = f"""
+        <div style="overflow-x:auto;margin-bottom:8px">
+        <table class="gpa-table">
+          <thead><tr>
+            <th style="text-align:left">Subject</th>
+            <th>Cr. Hrs</th><th>Total</th><th>Obtained</th>
+            <th>%</th><th>Grade Point</th><th>Grade</th><th>Quality Pts</th>
+          </tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table></div>"""
+        st.markdown(subj_table, unsafe_allow_html=True)
+
+        # Semester summary strip
+        gpa_val  = sg.gpa if sg else None
+        ch_total = sg.total_credit_hours if sg else 0
+        qp_total = sg.total_quality_points if sg else 0
+        gpa_cls  = _gpa_colour(gpa_val)
+        cgpa_cls = _gpa_colour(cgpa_val)
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.markdown(f"""<div class="kpi-box" style="padding:12px 16px">
+            <div class="kpi-value" style="font-size:1.4rem">{ch_total:.0f}</div>
+            <div class="kpi-label">Credit Hours</div></div>""",
+            unsafe_allow_html=True)
+        s2.markdown(f"""<div class="kpi-box" style="padding:12px 16px">
+            <div class="kpi-value" style="font-size:1.4rem">{qp_total:.2f}</div>
+            <div class="kpi-label">Quality Points</div></div>""",
+            unsafe_allow_html=True)
+        s3.markdown(f"""<div class="kpi-box" style="padding:12px 16px">
+            <div class="kpi-value {gpa_cls}" style="font-size:1.6rem;padding:4px 12px;border-radius:8px">
+            {f"{gpa_val:.2f}" if gpa_val is not None else "—"}</div>
+            <div class="kpi-label">Semester GPA</div></div>""",
+            unsafe_allow_html=True)
+        s4.markdown(f"""<div class="kpi-box" style="padding:12px 16px">
+            <div class="kpi-value {cgpa_cls}" style="font-size:1.6rem;padding:4px 12px;border-radius:8px">
+            {f"{cgpa_val:.2f}" if cgpa_val is not None else "—"}</div>
+            <div class="kpi-label">CGPA after Sem {sn}</div></div>""",
+            unsafe_allow_html=True)
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+    # ── CGPA Timeline ──────────────────────────────────────────────────────────
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">📈 Cumulative GPA Timeline</div>',
+                unsafe_allow_html=True)
+
+    # Build timeline table
+    hdr_cells = "".join(f"<th>Sem {sn}</th>" for sn in all_sems)
+    gpa_cells = "".join(
+        f'<td><span class="{_gpa_colour(sgpa_by_sem.get(sn, None) and sgpa_by_sem[sn].gpa)}"'
+        f' style="padding:3px 10px;border-radius:6px;font-weight:700">'
+        f'{f"{sgpa_by_sem[sn].gpa:.2f}" if sn in sgpa_by_sem and sgpa_by_sem[sn].gpa is not None else "—"}'
+        f'</span></td>'
+        for sn in all_sems
+    )
+    cgpa_cells = "".join(
+        f'<td><span class="{_gpa_colour(cgpa_by_sem.get(sn))}"'
+        f' style="padding:3px 10px;border-radius:6px;font-weight:700">'
+        f'{f"{cgpa_by_sem[sn]:.2f}" if cgpa_by_sem.get(sn) is not None else "—"}'
+        f'</span></td>'
+        for sn in all_sems
+    )
+
+    final_cgpa = cgpa_row.cgpa if cgpa_row else None
+    fc_cls     = _gpa_colour(final_cgpa)
+
+    timeline_html = f"""
+    <div style="overflow-x:auto">
+    <table class="gpa-table">
+      <thead><tr>
+        <th style="text-align:left">Metric</th>
+        {hdr_cells}
+        <th>Final CGPA</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td style="text-align:left;font-weight:600;color:#0F2444">Semester GPA</td>
+          {gpa_cells}
+          <td class="gpa-dash">—</td>
+        </tr>
+        <tr>
+          <td style="text-align:left;font-weight:600;color:#0F2444">Cumulative CGPA</td>
+          {cgpa_cells}
+          <td><span class="{fc_cls}" style="padding:3px 12px;border-radius:6px;font-weight:800">
+            {f"{final_cgpa:.2f}" if final_cgpa is not None else "—"}
+          </span></td>
+        </tr>
+      </tbody>
+    </table></div>
+    <div style="margin-top:10px;font-size:.75rem;color:#94A3B8">
+      🟢 ≥ 3.50 Excellent &nbsp;|&nbsp;
+      🟡 2.50–3.49 Good &nbsp;|&nbsp;
+      🔴 &lt; 2.50 At Risk &nbsp;|&nbsp;
+      🔵 Non-credit subject (excluded from GPA)
+    </div>"""
+    st.markdown(timeline_html, unsafe_allow_html=True)
+
+    # ── Final CGPA hero ────────────────────────────────────────────────────────
+    if final_cgpa is not None:
+        label = ("Excellent 🌟" if final_cgpa >= 3.50
+                 else "Good 👍" if final_cgpa >= 2.50
+                 else "At Risk ⚠️")
+        st.markdown(
+            f'<div style="text-align:center;margin-top:18px">'
+            f'<div style="font-size:3rem;font-weight:900;color:#0F2444">'
+            f'{final_cgpa:.2f}</div>'
+            f'<div style="font-size:1rem;color:#64748B;font-weight:600">'
+            f'Final CGPA · {label}</div>'
+            f'<div style="font-size:.8rem;color:#94A3B8;margin-top:4px">'
+            f'{len(all_sems)} semester(s) · '
+            f'{sum(sg.total_credit_hours for sg in sgpas):.0f} total credit hours · '
+            f'HEC Pakistan Standard</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # RESET
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _reset() -> None:
-    for k in ["stage","raw_files","file_assignments","file_subjects",
-              "semester_groups","sem_records","sem_dfs","approvals",
-              "val_reports","review_idx","ordered_sems","calc_results","final_saved"]:
+    for k in [
+        "stage", "raw_files", "file_assignments", "file_subjects",
+        "detection_source",
+        "semester_groups", "sem_file_records", "sem_file_dfs",
+        "sem_records", "approvals", "val_reports",
+        "ordered_sems", "calc_results", "final_saved", "invalid_files",
+    ]:
         st.session_state.pop(k, None)
 
 
@@ -1405,15 +5694,24 @@ def main() -> None:
     _init()
     render_sidebar()
 
-    stage = st.session_state.stage
-    if   stage == "upload"    : render_upload()
-    elif stage == "assign"    : render_assign()
-    elif stage == "review"    : render_review()
-    elif stage == "calculate" : render_calculate()
-    elif stage == "results"   : render_results()
-    else:
-        st.error(f"Unknown stage '{stage}'.")
-        if st.button("🔄 Reset"): _reset(); st.rerun()
+    # Top-level navigation tabs — Search is always available regardless of stage
+    nav_tab, search_tab = st.tabs(["📋 GPA Pipeline", "🔍 Student Search"])
+
+    with nav_tab:
+        stage = st.session_state.stage
+        if   stage == "upload"    : render_upload()
+        elif stage == "assign"    : render_assign()
+        elif stage == "review"    : render_review()
+        elif stage == "calculate" : render_calculate()
+        elif stage == "results"   : render_results()
+        else:
+            st.error(f"Unknown stage '{stage}'.")
+            if st.button("🔄 Reset"):
+                _reset()
+                st.rerun()
+
+    with search_tab:
+        render_search()
 
 
 if __name__ == "__main__":

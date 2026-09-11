@@ -5,9 +5,11 @@ LangGraph Node 2 — Excel / CSV Parser Agent
 University of Loralai — CS Department
 Tech Lead: Arif Khan
 
-Accepts ANY .xlsx or .csv file — no naming convention required.
-Detects semester number and subject name from filename heuristics,
-then falls back to file content when heuristics fail.
+Accepts .xlsx or .csv files named S{N}-{Subject}.xlsx (strict convention).
+Detects semester number and subject name from the filename.
+Automatically skips metadata header rows (rows 1–6) via scoring-based
+header detection, and strips trailing footer/signature rows before building
+student records.
 
 Public API used by the dashboard
 ──────────────────────────────────
@@ -73,6 +75,24 @@ _COL_ALIASES: dict[str, list[str]] = {
 
 _EXPECTED_FIELDS: list[str] = list(_COL_ALIASES.keys())
 
+# ─── Footer / signature row keywords ─────────────────────────────────────────
+# Rows whose combined text contains ANY of these words are treated as footer
+# rows and stripped from the bottom of the sheet before record-building.
+# Add university-specific phrases here as needed.
+_FOOTER_KEYWORDS: frozenset[str] = frozenset({
+    "signature", "signed", "sign",
+    "teacher", "teacher's", "subject teacher", "class teacher",
+    "head", "head of department", "hod",
+    "principal", "vice principal",
+    "controller", "controller of examinations",
+    "examiner", "external examiner", "internal examiner",
+    "lecturer", "instructor",
+    "dean", "chairman", "coordinator", "invigilator",
+    "prepared by", "checked by", "verified by", "approved by",
+    "countersigned", "seal", "stamp", "official use",
+    "date of issue", "remarks",
+})
+
 
 # ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -94,7 +114,16 @@ def _map_columns(df_cols: list[str]) -> dict[str, str]:
 
 
 def _find_header_row(df_raw: pd.DataFrame) -> int:
-    """Scan first 12 rows and return the row most likely to be the header."""
+    """
+    Scan first 25 rows and return the row most likely to be the column header.
+
+    Increased from 12 → 25 to accommodate sheets that contain up to 6 rows of
+    university metadata (name, subject, date, semester, etc.) before the actual
+    student-data header row.
+
+    Only rows that score ≥ 2 matching alias words are candidates; if none
+    score that high the function defaults to row 0 (safe fall-back).
+    """
     alias_words: set[str] = {
         word
         for aliases in _COL_ALIASES.values()
@@ -102,7 +131,7 @@ def _find_header_row(df_raw: pd.DataFrame) -> int:
         for word in a.split()
     }
     best_row, best_score = 0, -1
-    for i in range(min(12, len(df_raw))):
+    for i in range(min(25, len(df_raw))):
         row_words: set[str] = {
             word
             for v in df_raw.iloc[i].values
@@ -112,7 +141,8 @@ def _find_header_row(df_raw: pd.DataFrame) -> int:
         score = len(row_words & alias_words)
         if score > best_score:
             best_score, best_row = score, i
-    return best_row
+    # If best score is 0 or 1 the detection is unreliable — fall back to row 0.
+    return best_row if best_score >= 2 else 0
 
 
 def _prettify_subject(raw: str) -> str:
@@ -125,6 +155,38 @@ def _prettify_subject(raw: str) -> str:
     s = s.replace("_", " ").replace("-", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s.title() if len(s) > 2 else s.upper()
+
+
+def _trim_footer(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove trailing footer / signature rows from a parsed DataFrame.
+
+    Strategy — scan upward from the last row; drop a row if it is either:
+      (a) completely empty (all NaN / blank cells), or
+      (b) its combined cell text contains any _FOOTER_KEYWORDS word.
+
+    Stops as soon as the first genuine data row is encountered (from the
+    bottom up), so only contiguous tail rows are removed.
+
+    Returns a fresh DataFrame (reset index) without the footer rows.
+    """
+    end_idx = len(df)
+    for i in range(len(df) - 1, -1, -1):
+        row = df.iloc[i]
+        non_null = [
+            str(v).strip()
+            for v in row.values
+            if pd.notna(v) and str(v).strip().lower() not in ("", "nan", "none")
+        ]
+        if not non_null:
+            end_idx = i          # wholly empty — keep trimming
+            continue
+        row_text = " ".join(v.lower() for v in non_null)
+        if any(kw in row_text for kw in _FOOTER_KEYWORDS):
+            end_idx = i          # footer keyword found — keep trimming
+            continue
+        break                    # genuine student-data row — stop
+    return df.iloc[:end_idx].reset_index(drop=True)
 
 
 # ─── Public: semester + subject detector ──────────────────────────────────────
@@ -227,6 +289,7 @@ def parse_file_to_records(
 
     df.dropna(how="all", inplace=True)
     df.dropna(axis=1, how="all", inplace=True)
+    df = _trim_footer(df)          # ← strip trailing signature / footer rows
     df.reset_index(drop=True, inplace=True)
 
     if header_idx > 0:
