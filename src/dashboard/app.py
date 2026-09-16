@@ -2979,6 +2979,5 @@ def main() -> None:
     with transcript_tab:
         render_transcript()
 
-
 if __name__ == "__main__":
     main()
