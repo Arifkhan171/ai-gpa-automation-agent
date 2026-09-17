@@ -16,6 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
 from backend.database import init_db
+# Import User model so SQLAlchemy registers the 'acadtrack_users' table
+# against Base before init_db() / Base.metadata.create_all() is called.
+from backend.models.user_model import User  # noqa: F401 — side-effect import
 from backend.routers import (
     analytics,
     auth,
