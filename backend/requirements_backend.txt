@@ -9,3 +9,8 @@ alembic
 psycopg2-binary
 pydantic
 pydantic-settings
+qrcode[pil]
+Pillow
+pypdf
+reportlab
+email-validator
