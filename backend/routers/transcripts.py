@@ -28,6 +28,7 @@ from backend.schemas.transcript_schemas import (
     VerificationResponse,
 )
 from backend.services.qr_service import embed_qr_in_pdf, generate_verification_token
+from backend.services.audit_service import log_action
 from backend.utils.auth_utils import get_current_user, require_role
 from src.dashboard.transcript_generator import (
     fetch_student_transcript_data,
@@ -177,6 +178,17 @@ def generate_transcript(
             content={"error": str(exc), "traceback": tb},
         )
 
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="generated_transcript",
+        entity_type="student",
+        entity_id=request.roll_no,
+        details={"token": _token},
+        user_id=current_user.id,
+    )
+
     safe     = request.roll_no.replace("/", "_").replace("\\", "_")
     filename = f"{safe}_transcript.pdf"
 
@@ -265,7 +277,11 @@ def list_transcript_records(
     summary="Revoke a transcript — QR scan will return INVALID after this",
     dependencies=[Depends(require_role("controller", "super_admin"))],
 )
-def revoke_transcript(token: str, db: Session = Depends(get_db)):
+def revoke_transcript(
+    token: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     record = db.query(TranscriptRecord).filter(
         TranscriptRecord.verification_token == token
     ).first()
@@ -273,4 +289,13 @@ def revoke_transcript(token: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"No transcript found: {token}")
     record.is_valid = False
     db.commit()
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="revoked_transcript",
+        entity_type="transcript",
+        entity_id=token,
+        user_id=current_user.id,
+    )
     return {"message": "Transcript revoked successfully"}
