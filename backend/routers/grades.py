@@ -28,6 +28,7 @@ from backend.schemas.upload_schemas import (
     ValidationReportResponse,
 )
 from backend.services import pipeline_service
+from backend.services.audit_service import log_action
 from backend.utils.auth_utils import get_current_user, require_role
 
 router = APIRouter(prefix="/api/v1/grades", tags=["Grades"])
@@ -119,6 +120,17 @@ async def upload_grades(
 
     # Reload to get the latest status after the pipeline ran
     db.refresh(job)
+
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="uploaded_file",
+        entity_type="upload_job",
+        entity_id=job_id,
+        details={"file_name": file.filename},
+        user_id=current_user.id,
+    )
 
     return UploadResponse(
         job_id    = job_id,
@@ -405,6 +417,20 @@ def approve_job(
         )
 
     result = calc_outcome["result"]
+
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="approved_grades",
+        entity_type="upload_job",
+        entity_id=job_id,
+        details={
+            "semester": body.semester,
+            "marks_written": result.get("marks_written", 0),
+        },
+        user_id=current_user.id,
+    )
 
     # 6. Return summary
     return CalcResultResponse(
