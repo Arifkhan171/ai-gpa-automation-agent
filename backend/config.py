@@ -38,6 +38,25 @@ class Settings(BaseSettings):
     UNIVERSITY_NAME: str = "University of Loralai"
     DEPARTMENT: str = "CS Department"
 
+    # ── Email / SMTP ─────────────────────────────────────────────────
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_NAME: str = "AcadTrack UoL"
+    SMTP_FROM_EMAIL: str = ""
+    EMAIL_ENABLED: bool = False
+
+    # ── SMS / Twilio ─────────────────────────────────────────────────
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""
+    SMS_ENABLED: bool = False
+
+    # ── Notification queue ───────────────────────────────────────────
+    NOTIFICATION_RETRY_MAX: int = 3
+    NOTIFICATION_RETRY_DELAY_MINUTES: int = 5
+
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
         env_file_encoding="utf-8",
