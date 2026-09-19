@@ -9,6 +9,7 @@ The Streamlit app continues to run independently:
     streamlit run src/dashboard/app.py
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from backend.models.user_model import User                      # noqa: F401
 from backend.models.upload_model import UploadJob               # noqa: F401
 from backend.models.transcript_model import TranscriptRecord    # noqa: F401
 from backend.models.payment_model import PaymentVoucher         # noqa: F401
+from backend.models.notification_model import NotificationQueue, AuditLog  # noqa: F401
 from backend.schemas.transcript_schemas import VerificationResponse
 
 # Show INFO logs in terminal so we can trace the generate endpoint step by step
@@ -42,11 +44,34 @@ from backend.routers import (
 )
 
 
+# ── Background task: process notification queue every 60 seconds ──────────────
+async def process_queue_background():
+    """Runs forever in the background — polls the notification queue each minute."""
+    while True:
+        try:
+            db = next(get_db())
+            from backend.services.notification_service import (
+                process_notification_queue,
+            )
+            result = process_notification_queue(db)
+            if result["processed"] > 0:
+                print(f"[queue] {result}")
+        except Exception as e:
+            print(f"[queue] processor error: {e}")
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        await asyncio.sleep(60)
+
+
 # ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run initialisation tasks before the server starts accepting requests."""
     init_db()           # ensure backend tables exist (safe no-op if already present)
+    asyncio.create_task(process_queue_background())
     yield
     # nothing to clean up on shutdown
 
