@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.database import get_db
 from backend.models.user_model import User
+from src.models.database_models import Student
 from backend.schemas.auth_schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -50,10 +51,32 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     # 1. Look up the user
     user = db.query(User).filter(User.username == body.username).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+        # Student auto-login: check if the username matches a roll_no in Student table
+        student = (
+            db.query(Student)
+            .filter(Student.roll_no.ilike(body.username))
+            .first()
         )
+        if student:
+            # Auto-create a User record for this student
+            new_student_user = User(
+                username=student.roll_no,
+                email=f"{student.roll_no.replace('/', '_').replace(' ', '_')}@student.uol.edu.pk",
+                full_name=student.student_name,
+                hashed_password=hash_password("Student@123"),
+                role="student",
+                department=student.department,
+                is_active=True,
+            )
+            db.add(new_student_user)
+            db.commit()
+            db.refresh(new_student_user)
+            user = new_student_user
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password",
+            )
 
     # 2. Verify password
     if not verify_password(body.password, user.hashed_password):
