@@ -15,7 +15,7 @@ Endpoints:
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -37,13 +37,14 @@ from backend.utils.auth_utils import (
     require_role,
     verify_password,
 )
+from backend.services.audit_service import log_action
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
 
 # ── POST /login ───────────────────────────────────────────────────────────────
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """
     Authenticate with username + password.
     Returns a JWT Bearer token and basic user info.
@@ -104,7 +105,17 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         expires_delta=timedelta(minutes=expire_minutes),
     )
 
-    # 6. Return full response
+    # 6. Audit log — must not raise
+    log_action(
+        db,
+        username=user.username,
+        user_role=user.role,
+        action="login",
+        user_id=user.id,
+        ip_address=request.client.host if request.client else None,
+    )
+
+    # 7. Return full response
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
@@ -129,11 +140,16 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 # ── POST /logout ──────────────────────────────────────────────────────────────
 @router.post("/logout")
-def logout(current_user: User = Depends(get_current_user)):
+def logout(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
     Logout (stateless — instructs the client to discard the token).
     JWT cannot be server-side revoked; the frontend must delete the token.
     """
+    log_action(db, current_user.username, current_user.role, "logout",
+               user_id=current_user.id)
     return {"message": "Logged out successfully"}
 
 
@@ -152,6 +168,8 @@ def change_password(
         )
     current_user.hashed_password = hash_password(body.new_password)
     db.commit()
+    log_action(db, current_user.username, current_user.role, "changed_password",
+               user_id=current_user.id)
     return {"message": "Password changed successfully"}
 
 
