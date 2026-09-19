@@ -39,6 +39,11 @@ from backend.schemas.student_schemas import (
     StudentSummaryResponse,
     SubjectMarkResponse,
 )
+from backend.schemas.payment_schemas import StudentPortalResponse, VoucherResponse
+from backend.schemas.transcript_schemas import TranscriptRecordResponse
+from backend.services import portal_service
+from backend.models.transcript_model import TranscriptRecord
+from backend.models.payment_model import PaymentVoucher
 from backend.utils.grade_utils import get_grade_letter
 from src.models.database_models import CGPA, Mark, SemesterGPA, Student, Subject
 
@@ -139,6 +144,159 @@ def _build_semester_detail(
         total_credit_hours=sem_gpa.total_credit_hours,
         total_quality_points=sem_gpa.total_quality_points,
         gpa=sem_gpa.gpa,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STUDENT PORTAL ROUTES — /portal/* — declared first so they don't match /{roll_no}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── P1. GET /api/v1/students/portal/me ───────────────────────────────────────
+@router.get(
+    "/portal/me",
+    response_model=StudentPortalResponse,
+    summary="Student portal home — my academic summary",
+)
+def portal_me(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("student")),
+):
+    """
+    Returns the authenticated student's portal home data.
+    The student's roll_no is their username.
+    """
+    return portal_service.get_student_portal_data(
+        roll_no=current_user.username,
+        db=db,
+    )
+
+
+# ── P2. GET /api/v1/students/portal/my-grades ────────────────────────────────
+@router.get(
+    "/portal/my-grades",
+    response_model=StudentDetailResponse,
+    summary="Student portal — my full grade record",
+)
+def portal_my_grades(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("student")),
+):
+    """
+    Returns the authenticated student's full academic record.
+    Equivalent to GET /api/v1/students/{roll_no} but scoped to self.
+    """
+    roll_no = current_user.username
+    student = _student_or_404(roll_no, db)
+    cgpa_rec = db.query(CGPA).filter(CGPA.student_id == student.id).first()
+
+    semester_gpas = (
+        db.query(SemesterGPA)
+        .filter(SemesterGPA.student_id == student.id)
+        .order_by(SemesterGPA.semester.asc())
+        .all()
+    )
+
+    semesters_out = [
+        _build_semester_detail(student.id, sg, db)
+        for sg in semester_gpas
+    ]
+
+    cgpa_val = cgpa_rec.cgpa if cgpa_rec else None
+
+    return StudentDetailResponse(
+        id=student.id,
+        roll_no=student.roll_no,
+        student_name=student.student_name,
+        father_name=student.father_name,
+        department=student.department,
+        created_at=student.created_at,
+        cgpa=cgpa_val,
+        total_credit_hours=cgpa_rec.total_credit_hours if cgpa_rec else 0.0,
+        semesters_completed=cgpa_rec.semesters_completed if cgpa_rec else 0,
+        status=_get_status(cgpa_val),
+        semesters=semesters_out,
+    )
+
+
+# ── P3. GET /api/v1/students/portal/my-transcripts ───────────────────────────
+@router.get(
+    "/portal/my-transcripts",
+    response_model=List[TranscriptRecordResponse],
+    summary="Student portal — my issued transcripts",
+)
+def portal_my_transcripts(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("student")),
+):
+    """
+    Returns all valid transcripts issued to the authenticated student,
+    ordered by issue date descending.
+    """
+    records = (
+        db.query(TranscriptRecord)
+        .filter(TranscriptRecord.roll_no == current_user.username)
+        .order_by(TranscriptRecord.issued_at.desc())
+        .all()
+    )
+    return records
+
+
+# ── P4. GET /api/v1/students/portal/my-vouchers ──────────────────────────────
+@router.get(
+    "/portal/my-vouchers",
+    response_model=List[VoucherResponse],
+    summary="Student portal — my payment vouchers",
+)
+def portal_my_vouchers(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role("student")),
+):
+    """
+    Returns all payment vouchers belonging to the authenticated student,
+    ordered by creation date descending.
+    """
+    vouchers = (
+        db.query(PaymentVoucher)
+        .filter(PaymentVoucher.roll_no == current_user.username)
+        .order_by(PaymentVoucher.created_at.desc())
+        .all()
+    )
+    # VoucherResponse has a message field; set a default per-record message
+    results = []
+    for v in vouchers:
+        results.append(
+            VoucherResponse(
+                id=v.id,
+                voucher_number=v.voucher_number,
+                student_name=v.student_name,
+                roll_no=v.roll_no,
+                purpose=v.purpose,
+                amount=v.amount,
+                status=v.status,
+                semester_range=v.semester_range,
+                created_at=v.created_at,
+                expires_at=v.expires_at,
+                paid_at=v.paid_at,
+                action_taken=v.action_taken,
+                message=_voucher_status_message(v),
+            )
+        )
+    return results
+
+
+def _voucher_status_message(v) -> str:
+    if v.status == "paid" and v.action_taken:
+        return "Payment confirmed. Your transcript is ready for download."
+    if v.status == "paid":
+        return "Payment confirmed. Your request is being processed."
+    if v.status == "cancelled":
+        return "This voucher has been cancelled."
+    if v.status == "expired":
+        return "This voucher has expired. Please request a new one."
+    return (
+        f"Take voucher number {v.voucher_number} to the university cashier window "
+        f"and pay Rs. {v.amount:.0f}. Voucher expires on "
+        f"{v.expires_at.strftime('%Y-%m-%d')}."
     )
 
 
