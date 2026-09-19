@@ -37,6 +37,7 @@ from backend.schemas.payment_schemas import (
     VoucherResponse,
 )
 from backend.services.qr_service import embed_qr_in_pdf, generate_verification_token
+from backend.services.audit_service import log_action
 from backend.utils.auth_utils import get_current_user, require_role
 from src.models.database_models import Student
 from src.dashboard.transcript_generator import (
@@ -346,6 +347,17 @@ def mark_paid(
     if voucher.purpose == "transcript":
         _auto_generate_transcript(voucher, db, issued_by=current_user.username)
         db.refresh(voucher)
+
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="marked_voucher_paid",
+        entity_type="voucher",
+        entity_id=voucher_number,
+        details={"amount": voucher.amount, "student": voucher.roll_no},
+        user_id=current_user.id,
+    )
 
     message = (
         "Payment confirmed. Transcript has been generated and is ready for download."
