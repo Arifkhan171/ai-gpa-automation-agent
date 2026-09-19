@@ -24,6 +24,7 @@ from backend.database import get_db, init_db
 from backend.models.user_model import User                      # noqa: F401
 from backend.models.upload_model import UploadJob               # noqa: F401
 from backend.models.transcript_model import TranscriptRecord    # noqa: F401
+from backend.models.payment_model import PaymentVoucher         # noqa: F401
 from backend.schemas.transcript_schemas import VerificationResponse
 
 # Show INFO logs in terminal so we can trace the generate endpoint step by step
