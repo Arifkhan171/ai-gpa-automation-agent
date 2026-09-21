@@ -89,7 +89,7 @@ export const gradesApi = {
     }),
 
   uploadBatch: (formData: FormData) =>
-    api.post("/api/v1/grades/upload-batch", formData, {
+    api.post("/api/v1/grades/upload/batch", formData, {
       headers: { "Content-Type": "multipart/form-data" },
     }),
 
