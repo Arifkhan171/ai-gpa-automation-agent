@@ -13,9 +13,10 @@ export function formatCGPA(cgpa: number | null): string {
 export function getStatusColor(status: string): string {
   switch (status) {
     case "excellent":
-      return "bg-[#DCFCE7] text-[#16A34A]";
+      // BUG FIX: was same as "good" — now distinct deep emerald
+      return "bg-[#BBF7D0] text-[#15803D]";
     case "good":
-      return "bg-[#DCFCE7] text-[#16A34A]";
+      return "bg-[#D1FAE5] text-[#059669]";
     case "satisfactory":
       return "bg-[#FEF3C7] text-[#D97706]";
     case "at_risk":

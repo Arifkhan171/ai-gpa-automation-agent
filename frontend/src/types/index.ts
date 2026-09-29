@@ -40,7 +40,7 @@ export interface SubjectMark {
 
 export interface SemesterDetail {
   semester: number;
-  academic_year: string;
+  academic_year: string | null;   // BUG FIX: backend can return null
   subjects: SubjectMark[];
   total_credit_hours: number;
   total_quality_points: number;
