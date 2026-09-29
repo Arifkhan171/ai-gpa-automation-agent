@@ -24,6 +24,9 @@ from backend.schemas.upload_schemas import (
     BatchUploadResponse,
     CalcResultResponse,
     JobStatusResponse,
+    ParsedDataResponse,
+    ReValidateRequest,
+    ReValidateResponse,
     UploadResponse,
     ValidationReportResponse,
 )
@@ -132,6 +135,12 @@ async def upload_grades(
         user_id=current_user.id,
     )
 
+    # Check if a completed job with the same file name already exists
+    is_already_saved = db.query(UploadJob).filter(
+        UploadJob.file_name == file.filename,
+        UploadJob.status == "completed"
+    ).first() is not None
+
     return UploadResponse(
         job_id    = job_id,
         file_name = job.file_name,
@@ -141,6 +150,7 @@ async def upload_grades(
             if job.status == "awaiting_approval"
             else f"Pipeline finished with status: {job.status}"
         ),
+        already_saved = is_already_saved,
     )
 
 
@@ -230,6 +240,12 @@ async def upload_grades_batch(
         else:
             succeeded += 1
 
+        is_already_saved = db.query(UploadJob).filter(
+            UploadJob.file_name == file.filename,
+            UploadJob.status == "completed",
+            UploadJob.job_id != job_id
+        ).first() is not None
+
         job_responses.append(UploadResponse(
             job_id    = job_id,
             file_name = job.file_name,
@@ -239,13 +255,61 @@ async def upload_grades_batch(
                 if job.status == "awaiting_approval"
                 else f"Pipeline finished with status: {job.status}"
             ),
+            already_saved = is_already_saved,
         ))
+
+    # ── Run content-based duplicate detection across all jobs ─────────────────
+    # Build fingerprints from each job's parse_result (already stored in DB)
+    import json as _json
+    from backend.services.content_analysis import detect_duplicates_in_batch
+
+    fingerprints = []
+    for resp in job_responses:
+        if resp.job_id == "N/A":
+            continue
+        try:
+            _job = db.query(UploadJob).filter(UploadJob.job_id == resp.job_id).first()
+            if _job and _job.parse_result:
+                _pd = _json.loads(_job.parse_result)
+                _fp = _pd.get("content_fingerprint", {})
+                if _fp:
+                    fingerprints.append({
+                        **_fp,
+                        "job_id":        resp.job_id,
+                        "job_filename":  resp.file_name,
+                    })
+        except Exception:
+            pass
+
+    dup_warnings: dict[str, dict] = {}   # job_id → warning dict
+    if len(fingerprints) > 1:
+        dups = detect_duplicates_in_batch(fingerprints)
+        for d in dups:
+            dup_warnings[d["job_id"]] = d
+
+    # Rebuild responses with duplicate_warning injected
+    final_responses = []
+    for resp in job_responses:
+        dw = dup_warnings.get(resp.job_id)
+        if dw:
+            final_responses.append(UploadResponse(
+                job_id    = resp.job_id,
+                file_name = resp.file_name,
+                status    = resp.status,
+                message   = (
+                    f"[DUPLICATE WARNING] {dw['message']} "
+                    f"— {resp.message}"
+                ),
+                already_saved = resp.already_saved,
+            ))
+        else:
+            final_responses.append(resp)
 
     return BatchUploadResponse(
         total_files = len(files),
         succeeded   = succeeded,
         failed      = failed,
-        jobs        = job_responses,
+        jobs        = final_responses,
     )
 
 
@@ -439,4 +503,150 @@ def approve_job(
         semester_gpas = result.get("semester_gpas", []),
         cgpas         = result.get("cgpas", []),
         errors        = result.get("errors", []),
+    )
+
+
+# ── GET /jobs/{job_id}/parsed-data ────────────────────────────────────────────
+@router.get(
+    "/jobs/{job_id}/parsed-data",
+    response_model=ParsedDataResponse,
+    summary="Return the parsed student records for HITL inline editing",
+)
+def get_parsed_data(
+    job_id: str,
+    db:     Session = Depends(get_db),
+    current_user    = Depends(require_role("coordinator", "super_admin")),
+):
+    """
+    Return the raw parsed records stored in the UploadJob so the coordinator
+    can review and inline-edit them in the HITL review tab.
+
+    Semester detection priority:
+      1. Filename pattern  (S2-Pakistan.xlsx → 2,  Semester_6.xlsx → 6)
+      2. Content scan of parse_result records (subject_name metadata row)
+    """
+    import json, re as _re
+
+    job = _job_or_404(job_id, db)
+
+    if not job.parse_result:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No parsed data available for job '{job_id}'",
+        )
+
+    try:
+        parse_data = json.loads(job.parse_result)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored parse result is corrupt — please re-upload the file",
+        )
+
+    records = parse_data.get("records", [])
+
+    # ── Semester ──────────────────────────────────────────────────────────────
+    # 1. Content-based (stored at upload time by pipeline_service — preferred)
+    detected_semester: int | None = None
+    detected_subject:  str | None = None
+
+    sem_stored = parse_data.get("detected_semester")
+    if sem_stored is not None:
+        try:
+            detected_semester = int(sem_stored)
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Legacy filename fallback (old jobs uploaded before content detection)
+    if detected_semester is None:
+        import re as _re2
+        _stem2 = _re2.sub(r"\.[^.]+$", "", job.file_name or "")
+        for _p in [
+            _re2.compile(r"^[Ss](\d)\b"),
+            _re2.compile(r"\bSem(?:ester)?[_\s-]?(\d)\b", _re2.I),
+            _re2.compile(r"[-_\s](\d)[-_\s.]"),
+        ]:
+            _m2 = _p.search(_stem2)
+            if _m2:
+                _n2 = int(_m2.group(1))
+                if 1 <= _n2 <= 8:
+                    detected_semester = _n2
+                    break
+
+    # 3. Subject from first record
+    if records:
+        subj = records[0].get("subject_name")
+        if subj:
+            detected_subject = str(subj)
+
+    return ParsedDataResponse(
+        job_id            = job_id,
+        file_name         = job.file_name,
+        detected_semester = detected_semester,
+        detected_subject  = detected_subject,
+        records           = records,
+        total_records     = len(records),
+    )
+
+
+
+# ── POST /jobs/{job_id}/re-validate ──────────────────────────────────────────
+@router.post(
+    "/jobs/{job_id}/re-validate",
+    response_model=ReValidateResponse,
+    summary="Re-run validation on coordinator-edited records",
+)
+def re_validate_job(
+    job_id: str,
+    body:   ReValidateRequest,
+    db:     Session = Depends(get_db),
+    current_user    = Depends(require_role("coordinator", "super_admin")),
+):
+    """
+    Accept a list of manually-edited student records (same shape as parser output)
+    and re-run the validation agent on them.
+
+    The updated validation result is persisted to the job so a subsequent
+    approve call will use the corrected records.
+    """
+    outcome = pipeline_service.run_revalidate(
+        job_id         = job_id,
+        edited_records = body.records,
+        db_session     = db,
+    )
+
+    if not outcome.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=outcome.get("error", "Re-validation failed"),
+        )
+
+    report = outcome["report"]
+    summary = report.get("summary", {})
+
+    # Collect errors (BLOCKED) and warnings (FLAGGED) for the response
+    all_flagged: list[dict] = report.get("flagged_rows", [])
+    errors   = [f for f in all_flagged if f.get("severity") == "BLOCKED"]
+    warnings = [f for f in all_flagged if f.get("severity") in ("FLAGGED", "INFO")]
+
+    log_action(
+        db,
+        username=current_user.username,
+        user_role=current_user.role,
+        action="re_validated_job",
+        entity_type="upload_job",
+        entity_id=job_id,
+        details={"validation_status": report.get("status")},
+        user_id=current_user.id,
+    )
+
+    return ReValidateResponse(
+        job_id            = job_id,
+        validation_status = report.get("status", "BLOCKED"),
+        total_rows        = summary.get("total_rows", 0),
+        clean_rows        = summary.get("clean", 0),
+        flagged_rows      = summary.get("flagged", 0),
+        blocked_rows      = summary.get("blocked", 0),
+        errors            = [{"row": e.get("row_index"), "message": e.get("error_message"), "field": e.get("error_code")} for e in errors],
+        warnings          = [{"row": w.get("row_index"), "message": w.get("error_message"), "field": w.get("error_code")} for w in warnings],
     )
