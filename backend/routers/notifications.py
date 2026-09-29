@@ -240,7 +240,7 @@ def get_queue(
 @router.post("/process-queue")
 def trigger_process_queue(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin")),
+    current_user: User = Depends(require_role("coordinator", "super_admin")),
 ):
     """
     Manually trigger the notification queue processor right now.
@@ -260,7 +260,6 @@ def get_notification_stats(
     """
     Return aggregate counts of notifications by status and channel.
     """
-    total   = db.query(func.count(NotificationQueue.id)).scalar() or 0
     pending = db.query(func.count(NotificationQueue.id)).filter(
         NotificationQueue.status == "pending"
     ).scalar() or 0
@@ -270,6 +269,8 @@ def get_notification_stats(
     failed = db.query(func.count(NotificationQueue.id)).filter(
         NotificationQueue.status == "failed"
     ).scalar() or 0
+    # BUG 10 FIX: total must always equal pending + sent + failed
+    total = pending + sent + failed
 
     # Per-channel breakdown
     def _channel_counts(ch: str) -> dict:
