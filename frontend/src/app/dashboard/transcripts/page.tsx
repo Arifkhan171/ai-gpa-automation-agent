@@ -51,7 +51,7 @@ export default function TranscriptsPage() {
   // Local records state (to update on revoke)
   const [localRecords, setLocalRecords] = useState<TranscriptRecord[] | null>(null);
 
-  // Fetch records
+  // Fetch records — pass is_valid filter to backend
   const {
     data: rawRecords,
     isLoading,
@@ -60,7 +60,11 @@ export default function TranscriptsPage() {
   } = useApi<TranscriptRecord[] | TranscriptsResponse>(
     () =>
       transcriptsApi
-        .records({ roll_no: searchRoll || undefined, is_valid: statusFilter === "valid" ? true : statusFilter === "revoked" ? false : undefined })
+        .records({
+          roll_no: searchRoll || undefined,
+          // BUG FIX: is_valid filter was computed but never properly sent when empty
+          ...(statusFilter === "valid" ? { is_valid: true } : statusFilter === "revoked" ? { is_valid: false } : {}),
+        })
         .then((r) => r.data),
     [searchRoll, statusFilter]
   );
@@ -103,9 +107,17 @@ export default function TranscriptsPage() {
   // ── Download existing record ────────────────────────────────────────────────
   const handleDownload = async (record: TranscriptRecord) => {
     try {
+      // BUG FIX: was always sending up_to_semester: null (all semesters).
+      // Now parse semester_range from the stored record (e.g. "1-4" → up_to_semester 4).
+      let upTo: number | null = null;
+      if (record.semester_range && record.semester_range !== "all") {
+        // Range format is "1-N" — extract the last number
+        const match = record.semester_range.match(/(\d+)$/);
+        if (match) upTo = parseInt(match[1], 10);
+      }
       const res = await transcriptsApi.generate({
         roll_no: record.roll_no,
-        up_to_semester: null,
+        up_to_semester: upTo,
         is_unofficial: record.is_unofficial,
       });
       const blob = new Blob([res.data], { type: "application/pdf" });
