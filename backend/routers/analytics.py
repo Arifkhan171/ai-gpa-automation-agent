@@ -44,7 +44,7 @@ from src.models.database_models import CGPA, Mark, SemesterGPA, Student, Subject
 router = APIRouter(prefix="/api/v1/analytics", tags=["Analytics"])
 
 # Roles that may access every analytics endpoint
-_ANALYTICS_ROLES = ("hod", "controller", "super_admin")
+_ANALYTICS_ROLES = ("hod", "controller", "super_admin", "coordinator")
 
 # HEC Pakistan grade-boundary order used for distribution buckets
 _GRADE_ORDER = ["A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "F"]
