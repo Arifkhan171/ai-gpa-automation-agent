@@ -61,10 +61,11 @@ function StudentsListInner() {
     [page, search, department, status, semester]
   );
 
-  // Normalise response
+  // Normalise response — backend sends { total, page, page_size, total_pages, students: [...] }
   const students: Student[] = rawData?.items ?? rawData?.students ?? rawData?.data ?? [];
   const total: number = rawData?.total ?? students.length;
-  const totalPages: number = rawData?.pages ?? Math.ceil(total / 20);
+  // BUG FIX: backend field is total_pages, not pages
+  const totalPages: number = (rawData as { total_pages?: number })?.total_pages ?? Math.ceil(total / 20);
 
   const clearFilters = useCallback(() => {
     setSearchInput("");
@@ -78,7 +79,8 @@ function StudentsListInner() {
   const hasFilters = !!(search || department || status || semester);
 
   const handleRowClick = (s: Student) => {
-    router.push(`/dashboard/students/${s.roll_no}`);
+    // BUG 13 FIX: encode roll_no so slashes like "UoL/CS-F-22/001-BS" don't break routing
+    router.push(`/dashboard/students/${encodeURIComponent(s.roll_no)}`);
   };
 
   if (error) {
@@ -144,6 +146,7 @@ function StudentsListInner() {
           className="h-9 px-3 text-sm border border-[#E2E8F0] rounded-lg bg-white text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#2563EB]"
         >
           <option value="">Semester: All</option>
+          {/* University of Loralai has max 8 semesters — cap to 8 */}
           {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
             <option key={n} value={n}>Semester {n}</option>
           ))}
@@ -192,7 +195,7 @@ function StudentsListInner() {
                     <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Roll No</th>
                     <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Student Name</th>
                     <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Department</th>
-                    <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Semesters</th>
+                    <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Semesters Completed</th>
                     <th className="text-right py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">CGPA</th>
                     <th className="text-left py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Status</th>
                     <th className="text-right py-3 px-4 text-xs font-semibold text-[#64748B] uppercase tracking-wider">Action</th>
@@ -245,7 +248,7 @@ function StudentsListInner() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            router.push(`/dashboard/students/${s.roll_no}`);
+                            router.push(`/dashboard/students/${encodeURIComponent(s.roll_no)}`);
                           }}
                           className="px-3 py-1.5 text-xs font-medium text-[#2563EB] border border-[#2563EB] rounded-lg hover:bg-[#EFF6FF] transition-colors"
                         >
@@ -258,8 +261,8 @@ function StudentsListInner() {
               </table>
             </div>
 
-            {/* Pagination */}
-            <div className="flex items-center justify-between px-4 py-4 border-t border-[#E2E8F0]">
+            {/* Pagination — only shown when there are results */}
+            {total > 0 && <div className="flex items-center justify-between px-4 py-4 border-t border-[#E2E8F0]">
               <p className="text-sm text-[#64748B]">
                 Showing{" "}
                 <span className="font-medium text-[#0F172A]">
@@ -310,7 +313,7 @@ function StudentsListInner() {
                   Next →
                 </button>
               </div>
-            </div>
+            </div>}
           </>
         )}
       </div>

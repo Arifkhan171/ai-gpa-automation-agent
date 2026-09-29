@@ -163,7 +163,10 @@ function SemesterTab({ sem }: { sem: SemesterDetail }) {
 export default function StudentDetailPage() {
   const router = useRouter();
   const params = useParams();
-  const roll_no = params?.roll_no as string;
+  // BUG 13 FIX: decode the URL-encoded roll_no (e.g. "UoL%2FCS-F-22%2F001-BS" → "UoL/CS-F-22/001-BS")
+  const roll_no = decodeURIComponent(params?.roll_no as string ?? "");
+  // Re-encode for embedding in API URL paths to avoid path-splitting on "/"
+  const encodedRollNo = encodeURIComponent(roll_no);
 
   const [activeTab, setActiveTab] = useState(0);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
@@ -178,16 +181,16 @@ export default function StudentDetailPage() {
     error: studentError,
     refetch: studentRefetch,
   } = useApi<StudentDetail>(
-    () => studentsApi.detail(roll_no).then((r) => r.data),
-    [roll_no]
+    () => studentsApi.detail(encodedRollNo).then((r) => r.data),
+    [encodedRollNo]
   );
 
   // Fetch CGPA history
   const { data: rawHistory, isLoading: historyLoading } = useApi<
     CGPAHistoryItem[] | CGPAHistoryResponse
   >(
-    () => studentsApi.cgpaHistory(roll_no).then((r) => r.data),
-    [roll_no]
+    () => studentsApi.cgpaHistory(encodedRollNo).then((r) => r.data),
+    [encodedRollNo]
   );
 
   const historyItems: CGPAHistoryItem[] = Array.isArray(rawHistory)
@@ -197,7 +200,8 @@ export default function StudentDetailPage() {
 
   const chartData = historyItems.map((h) => ({
     name: String(h.semester),
-    cgpa: h.cgpa ?? h.gpa ?? 0,
+    // BUG FIX: backend returns 'cgpa_after_semester', not 'cgpa'
+    cgpa: (h as unknown as { cgpa_after_semester?: number }).cgpa_after_semester ?? h.cgpa ?? h.gpa ?? 0,
   }));
 
   // Generate transcript
@@ -206,12 +210,12 @@ export default function StudentDetailPage() {
     setGenError(null);
     try {
       const res = await transcriptsApi.generate({
-        roll_no,
+        roll_no: roll_no,
         up_to_semester: upToSem === "all" ? null : Number(upToSem),
         is_unofficial: false,
       });
       const blob = new Blob([res.data], { type: "application/pdf" });
-      downloadBlob(blob, `transcript-${roll_no}.pdf`);
+      downloadBlob(blob, `transcript-${encodedRollNo}.pdf`);
       setTranscriptOpen(false);
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } }; message?: string };
@@ -231,6 +235,16 @@ export default function StudentDetailPage() {
   }
 
   if (studentError || !student) {
+    // BUG 13 FIX: show friendly error, never render raw error objects
+    const safeError = (() => {
+      try {
+        if (!studentError) return "Student not found.";
+        if (typeof studentError === "string") return studentError;
+        return "Failed to load student profile. Please try again.";
+      } catch {
+        return "An unexpected error occurred.";
+      }
+    })();
     return (
       <div>
         <button
@@ -240,7 +254,7 @@ export default function StudentDetailPage() {
           <ArrowLeft className="w-4 h-4" /> Back
         </button>
         <ErrorMessage
-          message={studentError ?? "Student not found"}
+          message={safeError}
           onRetry={studentRefetch}
         />
       </div>
