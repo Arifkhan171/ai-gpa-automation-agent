@@ -110,6 +110,19 @@ def _generate_one(
     if data is None:
         raise HTTPException(status_code=404, detail=f"Student not found: {roll_no}")
 
+    # BUG 8 FIX: Deduplicate subjects within each semester by subject_id
+    # Prevents duplicate rows in the PDF when the same subject appears twice in DB
+    for sem in data.get("semesters", []):
+        subjects_list = sem.get("subjects", [])
+        seen_subjects: set = set()
+        unique_subjects = []
+        for subj in subjects_list:
+            sid = subj.get("subject_id") if isinstance(subj, dict) else getattr(subj, "subject_id", None)
+            if sid not in seen_subjects:
+                seen_subjects.add(sid)
+                unique_subjects.append(subj)
+        sem["subjects"] = unique_subjects
+
     # Step 2: filter semesters
     data, semester_range = _filter_and_recalc(data, up_to_semester)
     logger.info(f"[generate] semester_range={semester_range}, semesters={len(data['semesters'])}")
