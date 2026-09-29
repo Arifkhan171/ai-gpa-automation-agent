@@ -116,13 +116,17 @@ export default function PaymentsPage() {
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const today = new Date().toISOString().split("T")[0];
+    // BUG 12 FIX: Use toDateString() comparison so timezone differences
+    // (UTC vs local) never cause today's amount to show Rs. 0
+    const today = new Date().toDateString();
     const pending = vouchers.filter((v) => v.status === "pending").length;
     const paidToday = vouchers.filter(
-      (v) => v.status === "paid" && v.paid_at?.startsWith(today)
+      (v) => v.status === "paid" && v.paid_at != null &&
+             new Date(v.paid_at).toDateString() === today
     ).length;
     const paidTodayAmount = vouchers
-      .filter((v) => v.status === "paid" && v.paid_at?.startsWith(today))
+      .filter((v) => v.status === "paid" && v.paid_at != null &&
+                     new Date(v.paid_at).toDateString() === today)
       .reduce((sum, v) => sum + v.amount, 0);
     const thisMonth = new Date().toISOString().slice(0, 7);
     const totalMonth = vouchers
