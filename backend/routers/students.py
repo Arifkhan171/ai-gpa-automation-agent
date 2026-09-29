@@ -360,12 +360,9 @@ def list_students(
         elif status == "no_grades":
             query = query.filter(CGPA.cgpa.is_(None))
 
-    # Semester: students who have a SemesterGPA row for that semester
+    # Semester: filter students whose latest completed semester is exactly `semester`
     if semester is not None:
-        subq = db.query(SemesterGPA.student_id).filter(
-            SemesterGPA.semester == semester
-        )
-        query = query.filter(Student.id.in_(subq))
+        query = query.filter(CGPA.semesters_completed == semester)
 
     total = query.count()
     offset = (page - 1) * page_size
