@@ -246,7 +246,12 @@ def recompute_cgpa(session: Session, student_id: int) -> CGPA:
 
     total_credit_hours = sum(s.total_credit_hours for s in sem_gpas)
     total_quality_points = sum(s.total_quality_points for s in sem_gpas)
-    semesters_completed = sum(1 for s in sem_gpas if s.gpa is not None)
+    
+    unique_completed_sems = {
+        s.semester for s in sem_gpas 
+        if s.gpa is not None and s.semester > 0
+    }
+    semesters_completed = len(unique_completed_sems)
 
     cgpa_value: Optional[float] = None
     if total_credit_hours > 0:
