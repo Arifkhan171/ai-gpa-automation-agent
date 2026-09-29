@@ -106,6 +106,12 @@ export const gradesApi = {
 
   jobs: (params?: Record<string, unknown>) =>
     api.get("/api/v1/grades/jobs", { params }),
+
+  parsedData: (job_id: string) =>
+    api.get(`/api/v1/grades/jobs/${job_id}/parsed-data`),
+
+  reValidate: (job_id: string, records: Record<string, unknown>[]) =>
+    api.post(`/api/v1/grades/jobs/${job_id}/re-validate`, { records }),
 };
 
 // ────────────────────────────────────────────────
