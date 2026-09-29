@@ -102,3 +102,16 @@ def seed() -> None:
 
 if __name__ == "__main__":
     seed()
+
+
+#     cd gpa-agentic-system
+#
+#  uvicorn backend.main:app --reload --port 8000
+
+
+
+
+# cd gpa-agentic-system/frontend
+# npm run dev
+
+# python "C:\Users\PMYLS\.gemini\antigravity-ide\brain\9730f4c3-b5a7-47f4-8e0a-61b7923b92e8\scratch\reset_db.py"
