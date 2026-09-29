@@ -136,6 +136,13 @@ def embed_qr_in_pdf(
 
     # ── Merge overlay onto every page of the original PDF ────────────────────
     original_reader = PdfReader(io.BytesIO(pdf_bytes))
+
+    # BUG 8 FIX: Guard against double-embedding — check /AcadTrackQR marker
+    info = original_reader.metadata or {}
+    if info.get("/AcadTrackQR"):
+        # QR already embedded; return original PDF unchanged
+        return pdf_bytes
+
     overlay_reader  = PdfReader(overlay_buf)
     overlay_page    = overlay_reader.pages[0]
 
@@ -143,6 +150,9 @@ def embed_qr_in_pdf(
     for page in original_reader.pages:
         page.merge_page(overlay_page)
         writer.add_page(page)
+
+    # Stamp a custom metadata key so a second call knows QR is already there
+    writer.add_metadata({"/AcadTrackQR": verification_token})
 
     out_buf = io.BytesIO()
     writer.write(out_buf)
