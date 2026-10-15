@@ -48,7 +48,7 @@ Built with a *3-engineer LangGraph pipeline* under tech lead supervision with fu
 
 ---
 
-## 📸 Screenshots
+## 📸 Screenshotss
 
 <details open>
 <summary><b>🔐 Login — Role-Based Access Control</b></summary>
