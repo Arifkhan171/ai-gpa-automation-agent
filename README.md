@@ -166,7 +166,7 @@ Built with a *3-engineer LangGraph pipeline* under tech lead supervision with fu
 
 ## 🏗️ Agent Pipeline Architecture
 
-mermaid
+ ```mermaid
 %%{init: {'theme': 'dark'}}%%
 flowchart TD
     A[📁 Google Drive\nExcel Mark Sheets] --> B
@@ -197,7 +197,7 @@ flowchart TD
     style I fill:#2ea44f,color:#fff
     style J fill:#d71f00,color:#fff
 
-
+ ```
 ---
 
 ## 🛠️ Tech Stack
